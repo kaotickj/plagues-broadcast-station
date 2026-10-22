@@ -20,7 +20,7 @@ plagues-broadcast-station = "gnb_player.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-gnb_player = ["extraction_backend/*.py", "extract_worker.py", "extraction.py", "model_install.py", "model_install_worker.py", "model_discovery.py"]
+gnb_player = ["extraction_backend/*.py", "extract_worker.py", "extraction.py", "model_install.py", "model_install_worker.py", "model_discovery.py", "assets/*.png", "assets/*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

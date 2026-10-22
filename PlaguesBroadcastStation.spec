@@ -2,6 +2,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from PyInstaller.utils.hooks import copy_metadata
 
 root = Path(SPECPATH)
@@ -12,6 +13,8 @@ worker_data = [(str(package / name), "gnb_player")
 worker_data += [(str(path), "gnb_player/extraction_backend")
                 for path in sorted((package / "extraction_backend").glob("*.py"))]
 assets = [(str(path), "assets") for path in (root / "assets").glob("*") if path.is_file()]
+assets += [(str(path), "gnb_player/assets")
+           for path in (package / "assets").glob("*") if path.is_file()]
 ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
 if not ffmpeg or not ffprobe:
     raise SystemExit("Build prerequisite missing: install FFmpeg and ffprobe on PATH; this standalone package must include both tools.")
@@ -48,6 +51,7 @@ exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
     name="PlaguesBroadcastStation",
+    icon=str(package / "assets" / "broadcast-icon.ico") if sys.platform == "win32" else None,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

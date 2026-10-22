@@ -19,6 +19,15 @@ from .extraction import ExtractionConfig, discover_config, config_status, build_
 from .settings import atomic_json, read_profile, write_profile, load_m3u, save_m3u, starter_profile
 
 APP_NAME = "Plague's Broadcast Station"
+
+def application_icon() -> QIcon:
+    """Use the same sized artwork in source, wheel and standalone builds."""
+    icon = QIcon()
+    assets = Path(__file__).resolve().with_name('assets')
+    for size in (16, 24, 32, 48, 64, 128, 256, 512):
+        icon.addFile(str(assets / f'broadcast-icon-{size}.png'), QSize(size, size))
+    return icon
+
 STYLE = """
 QWidget { background:#101c24; color:#e9e8e1; font-family:'DejaVu Sans'; font-size:13px; }
 QMainWindow, QTabWidget::pane { background:#101c24; }
@@ -555,6 +564,7 @@ def main(argv=None):
     else:roots=[Path(__file__).resolve().parents[2]]
     if args.profile is None:args.profile=starter_profile(args.data_dir,roots)
     app=QApplication.instance() or QApplication(sys.argv[:1]); app.setApplicationName(APP_NAME); app.setOrganizationName('Plague Broadcast'); app.setStyleSheet(STYLE)
+    app.setWindowIcon(application_icon()); app.setDesktopFileName('plagues-broadcast-station')
     window=MainWindow(args.data_dir,args.profile); window.show()
     if args.show_output:window.show_output()
     if args.setup_models:QTimer.singleShot(0,window.open_model_setup)
