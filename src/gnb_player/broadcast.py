@@ -110,10 +110,9 @@ def build_command(config: BroadcastConfig, video_port: int, audio_port: int) -> 
         "-maxrate", f"{config.bitrate_kbps}k", "-bufsize", f"{config.bitrate_kbps * 2}k",
         "-pix_fmt", "yuv420p", "-g", str(config.fps * 2), "-keyint_min", str(config.fps * 2),
         "-sc_threshold", "0", "-c:a", "aac", "-b:a", "192k", "-ar", str(AUDIO_RATE), "-ac", "2",
-        # -fps_mode was added after the FFmpeg shipped by Ubuntu 22.04.
-        # The equivalent global CFR option is supported by both that 4.4
-        # release and current FFmpeg (the encoder has one video output).
-        "-vsync", "cfr", "-shortest",
+        # Output -r forces this encoding rate across FFmpeg 4.4 and 9;
+        # -fps_mode is newer, while the older -vsync was removed in 9.
+        "-r:v", str(config.fps), "-shortest",
     ]
     if config.mode == "stream":
         command += ["-f", "flv", "-flvflags", "no_duration_filesize"]

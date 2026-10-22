@@ -1,6 +1,7 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from pathlib import Path
+from fractions import Fraction
 import json,math,shutil,subprocess,time
 
 import numpy as np
@@ -30,9 +31,10 @@ def test_arguments_are_separate_and_no_capture_device_or_shell_is_used(tmp_path)
     args=build_command(config,12345,12346)
     assert args[-1]==str(target.resolve())
     assert '-n' in args and 'libx264' in args and 'aac' in args
-    # Ubuntu 22.04 ships FFmpeg 4.4, which rejects the newer -fps_mode flag.
-    assert '-fps_mode' not in args
-    assert args[args.index('-vsync')+1]=='cfr'
+    # Output -r works on both FFmpeg 4.4 and 9 without version-specific flags.
+    assert '-fps_mode' not in args and '-vsync' not in args
+    assert args[args.index('-r:v')+1]==str(config.fps)
+    assert args.index('-r:v')>max(i for i,arg in enumerate(args) if arg=='-i')
     assert args[args.index('-framerate')+1]==str(config.fps)
     assert 'tcp://127.0.0.1:12345?timeout=5000000' in args
     assert 'tcp://127.0.0.1:12346?timeout=5000000' in args
@@ -96,6 +98,7 @@ def test_real_ten_second_recording_has_synchronized_video_and_actual_tone(tmp_pa
     streams={s['codec_type']:s for s in report['streams']}
     assert streams['video']['codec_name']=='h264' and streams['audio']['codec_name']=='aac'
     assert streams['video']['width']==640 and streams['video']['height']==360
+    assert Fraction(streams['video']['avg_frame_rate'])==config.fps
     assert 9<=float(report['format']['duration'])<=11
     assert abs(float(streams['video']['duration'])-float(streams['audio']['duration']))<.18
     decoded=subprocess.check_output(['ffmpeg','-v','error','-i',str(output),'-map','0:a:0','-t','3','-f','f32le','-ac','2','-ar','48000','-'])
