@@ -39,6 +39,22 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
+          # The runner's Azure mirror can stall on every small package. Keep
+          # Ubuntu's normal signed repositories, using their HTTPS origin.
+          for pbs_mirrors in /etc/apt/apt-mirrors.txt /etc/apt/apt-mirrors-security.txt; do
+            if [[ -f "$pbs_mirrors" ]]; then
+              if [[ "$pbs_mirrors" == *security* ]]; then
+                printf '%s\n' 'https://security.ubuntu.com/ubuntu/' | sudo tee "$pbs_mirrors" >/dev/null
+              else
+                printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee "$pbs_mirrors" >/dev/null
+              fi
+            fi
+          done
+          for pbs_sources in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+            if [[ -f "$pbs_sources" ]]; then
+              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$pbs_sources"
+            fi
+          done
           if ! sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update; then
             echo 'Package index refresh was incomplete; trying the runner package metadata.'
           fi
