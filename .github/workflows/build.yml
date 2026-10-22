@@ -1,0 +1,82 @@
+name: Native desktop builds
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            artifact: PlaguesBroadcastStation-linux-x86_64
+          - name: Windows x86_64
+            os: windows-latest
+            artifact: PlaguesBroadcastStation-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_MEDIA_BACKEND: ffmpeg
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Linux Qt system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libegl1 libgl1 libxkbcommon0 libxcb-cursor0 libasound2 libpulse0
+      - name: Windows FFmpeg tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+          }
+          $ffmpeg = Get-ChildItem "$env:ChocolateyInstall\lib\ffmpeg*" -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($ffmpeg) { Add-Content $env:GITHUB_PATH $ffmpeg.DirectoryName }
+      - name: Install desktop build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[build,test]"
+      - name: Run model-free tests
+        run: python -m pytest -q
+      - name: Build native standalone folder
+        run: python -m PyInstaller --clean --noconfirm PlaguesBroadcastStation.spec
+      - name: Include platform launchers
+        shell: python
+        run: |
+          import pathlib, shutil, os
+          source = pathlib.Path('run-windows.bat' if os.name == 'nt' else 'run-linux.sh')
+          target = pathlib.Path('dist/PlaguesBroadcastStation') / source.name
+          shutil.copy2(source, target)
+          for name in ('README.md', 'THIRD_PARTY_NOTICES.md', 'requirements-lyrics.txt'):
+              shutil.copy2(name, target.parent / name)
+          shutil.copytree('docs', target.parent / 'docs', dirs_exist_ok=True)
+      - name: Package build
+        shell: python
+        run: |
+          import pathlib, shutil
+          pathlib.Path('artifacts').mkdir(exist_ok=True)
+          shutil.make_archive('artifacts/${{ matrix.artifact }}', 'zip', 'dist', 'PlaguesBroadcastStation')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 14

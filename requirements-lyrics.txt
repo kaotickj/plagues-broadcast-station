@@ -1,0 +1,10 @@
+# Optional external CPU lyric runtime. Not installed for the GUI or CI builds.
+# Use Python 3.11-3.13. This preserves the CTC forced_align API used by the routine.
+torch>=2.8,<2.9
+torchaudio>=2.8,<2.9
+numpy>=1.26,<3
+soundfile>=0.12,<1
+faster-whisper>=1.1,<2
+demucs==4.0.1
+safetensors>=0.4,<1
+num2words>=0.5.13,<1
