@@ -37,12 +37,12 @@ jobs:
           cache: pip
       - name: Linux Qt system libraries
         if: runner.os == 'Linux'
-        timeout-minutes: 4
+        timeout-minutes: 10
         run: |
           if ! sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update; then
             echo 'Package index refresh was incomplete; trying the runner package metadata.'
           fi
-          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y ffmpeg libegl1 libgl1 libxkbcommon0 libxcb-cursor0 libasound2 libpulse0
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg libegl1 libgl1 libxkbcommon0 libxcb-cursor0 libasound2 libpulse0
       - name: Windows FFmpeg tools
         if: runner.os == 'Windows'
         shell: pwsh
