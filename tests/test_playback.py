@@ -5,6 +5,7 @@ import random
 import time
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -121,6 +122,32 @@ def test_all_missing_files_stop_after_one_bounded_pass(application, tmp_path):
     assert not engine.playing
     assert any("none of the queued" in error for error in errors)
     assert len(engine._failed) == 3
+
+
+def test_previous_restart_clears_queued_audio_before_seeking(application, tmp_path):
+    engine = PlaybackEngine()
+    engine.tracks = [Track(tmp_path / "song.wav", "Song", duration=60)]
+    engine.order = QueueOrder(1)
+    engine.order.select(0)
+    queued_audio = bytearray(b"old decoded audio")
+    events = []
+    def reset():
+        queued_audio.clear()
+        events.append("reset")
+    def set_position(milliseconds):
+        assert not queued_audio, "Pre-seek program audio must be cleared before moving the decoder."
+        events.append(("seek", milliseconds))
+    engine.transport_reset.connect(reset)
+    engine.player = SimpleNamespace(position=lambda: 5000, duration=lambda: 60000, setPosition=set_position)
+    engine.previous()
+    assert events == ["reset", ("seek", 0)]
+    assert engine.current_index == 0
+    queued_audio.extend(b"another decoded block")
+    engine.seek(4.25)
+    assert events[-2:] == ["reset", ("seek", 4250)]
+    before = list(events)
+    engine.seek(float("nan"))
+    assert events == before
 
 
 def test_reorder_and_add_preserve_real_media_clock_and_removal_advances(application, tmp_path):

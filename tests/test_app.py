@@ -56,3 +56,14 @@ def test_replaced_recording_cannot_restore_cached_lyrics(window,tmp_path):
     with pytest.raises(ValueError):window._find_document(track)
     window._remember_document(track,None)
     assert str(source) not in window.documents and not window._has_lyrics(track)
+
+def test_keyboard_slider_seeks_without_feedback_from_position_updates(window,monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    values=[]
+    monkeypatch.setattr(type(window.engine),'duration',property(lambda engine:100.0))
+    monkeypatch.setattr(window.engine,'seek',values.append)
+    window.seek.setValue(5000);QTest.keyClick(window.seek,Qt.Key.Key_Right)
+    assert len(values)==1 and values[0]>50
+    window._position(10)
+    assert len(values)==1

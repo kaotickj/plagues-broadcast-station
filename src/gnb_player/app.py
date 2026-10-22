@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
         self.preview = QLabel(); self.preview.setMinimumSize(480,270); self.preview.setMaximumHeight(340); self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.preview.setAccessibleName('Program preview. The separate Program Output window is the clean broadcast picture.'); self.preview.setStyleSheet('background:#050b10;border:1px solid #536570;'); detail.addWidget(self.preview)
         self.now_title=QLabel('Your next great broadcast'); self.now_title.setObjectName('nowTitle'); self.now_title.setWordWrap(True); detail.addWidget(self.now_title)
         self.now_artist=QLabel('Choose a track from the playlist.'); self.now_artist.setObjectName('muted'); detail.addWidget(self.now_artist)
-        self.seek=QSlider(Qt.Orientation.Horizontal); self.seek.setRange(0,10000); self.seek.setAccessibleName('Recording position'); self.seek.sliderPressed.connect(lambda:self._set_seek_drag(True)); self.seek.sliderReleased.connect(self._seek_released); detail.addWidget(self.seek)
+        self.seek=QSlider(Qt.Orientation.Horizontal); self.seek.setRange(0,10000); self.seek.setAccessibleName('Recording position'); self.seek.sliderPressed.connect(lambda:self._set_seek_drag(True)); self.seek.sliderReleased.connect(self._seek_released); self.seek.actionTriggered.connect(self._seek_action); detail.addWidget(self.seek)
         playback=QHBoxLayout()
         for text,slot in [('Previous',self.engine.previous),('Play',self.toggle_play),('Stop',self.engine.stop),('Next',self.engine.next)]:
             b=self._button(text,slot,text=='Play'); playback.addWidget(b)
@@ -189,7 +189,7 @@ class MainWindow(QMainWindow):
             entry=QLineEdit(str(getattr(self.extract_config,key))); entry.setAccessibleName(label); self.model_fields[key]=entry; form.addRow(label,entry)
         v.addLayout(form); self.gpu=QCheckBox('Use GPU when available; wait while another job uses it'); self.gpu.setChecked(self.extract_config.use_gpu); v.addWidget(self.gpu)
         v.addWidget(self._button('Save model settings',self.save_model_settings)); self.model_status=QLabel(''); self.model_status.setWordWrap(True); v.addWidget(self.model_status)
-        note=QLabel('Playback does not require AI models. Extraction uses a separate local Python runtime so heavy work stays outside the player. Existing models on this Linux machine are detected automatically.'); note.setWordWrap(True); note.setObjectName('muted'); v.addWidget(note); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Lyric models'); self.update_model_status()
+        note=QLabel('Playback does not require AI models. Extraction uses a separate local Python runtime so heavy work stays outside the player. Configure your installed runtime and models here; local settings are restored on later launches.'); note.setWordWrap(True); note.setObjectName('muted'); v.addWidget(note); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Lyric models'); self.update_model_status()
 
     def _connect(self):
         self.engine.position_changed.connect(self._position)
@@ -198,6 +198,7 @@ class MainWindow(QMainWindow):
         self.engine.track_changed.connect(self._track_changed)
         self.engine.waveform_ready.connect(self.stage.set_waveform)
         self.engine.pcm_ready.connect(self.export.push_audio)
+        self.engine.transport_reset.connect(self.export.clear_audio)
         self.engine.video_frame_ready.connect(self.stage.set_video_frame)
         self.engine.error.connect(self._message)
         self.stage.background_error.connect(self._message)
@@ -215,7 +216,9 @@ class MainWindow(QMainWindow):
     def _message(self, text): self.statusBar().showMessage(str(text),20000)
     def _set_seek_drag(self,value): self._seek_drag=value
     def _seek_released(self):
-        self.engine.seek(self.seek.value()/10000*max(0,self.engine.duration)); self._seek_drag=False; self.export.clear_audio()
+        self.engine.seek(self.seek.value()/10000*max(0,self.engine.duration)); self._seek_drag=False
+    def _seek_action(self,action):
+        if not self._seek_drag:self.engine.seek(self.seek.sliderPosition()/10000*max(0,self.engine.duration))
     def _position(self, position):
         self.stage.set_playback(position,self.engine.duration,self.engine.playing)
         self.time_label.setText(clock(position)+' / '+clock(self.engine.duration))

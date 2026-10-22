@@ -141,6 +141,7 @@ class PlaybackEngine(QObject):
     pcm_ready = Signal(bytes)
     video_frame_ready = Signal(object)
     queue_changed = Signal()
+    transport_reset = Signal()
     error = Signal(str)
 
     def __init__(self, parent=None):
@@ -294,6 +295,9 @@ class PlaybackEngine(QObject):
         if not isinstance(seconds, (int, float)) or not math.isfinite(seconds):
             return
         maximum = self.duration or (self.current_track.duration if self.current_track else 0)
+        # Consumers must discard pre-seek PCM before the decoder moves its clock.
+        # This also covers previous() restarting the current recording.
+        self.transport_reset.emit()
         self.player.setPosition(round(max(0.0, min(float(seconds), maximum or float(seconds))) * 1000))
 
     def set_volume(self, volume: float):

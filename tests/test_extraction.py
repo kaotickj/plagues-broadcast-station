@@ -36,7 +36,7 @@ class ExtractionTests(unittest.TestCase):
                       "GNB_PLAYER_GPU_PYTHON": str(base / "gpu-runtime/python"),
                       "GNB_PLAYER_VULKAN_BINARY": str(base / "tools/whisper"),
                       "GNB_PLAYER_GPU_LOCK": str(base / "coordination.lock")}
-            with patch.dict(os.environ, values, clear=True):
+            with patch.dict(os.environ, values, clear=True), patch("gnb_player.extraction.default_data_dir", return_value=base):
                 configured = discover_config()
             self.assertEqual(configured.python_path, values["GNB_PLAYER_PYTHON"])
             self.assertEqual(configured.model_root, values["GNB_PLAYER_MODELS"])
