@@ -17,7 +17,7 @@ import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from extraction import ExtractionConfig, config_status, media_environment
+from extraction import ExtractionConfig, config_status, media_environment, effective_model_paths, required_model_files
 
 OUTPUT = sys.stdout
 OWN_PROCESS_GROUP = False
@@ -92,9 +92,15 @@ def prepare_environment(config: ExtractionConfig) -> None:
     if not config.cache_dir:
         raise ValueError("Choose a writable private extraction cache directory.")
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    models = effective_model_paths(config)
     values = {
         "GNB_LYRICS_MODEL_ROOT": config.model_root,
         "TORCH_HOME": config.torch_home,
+        "GNB_LYRICS_TRANSCRIPTION_MODEL": str(models["transcription"]),
+        "GNB_LYRICS_REVIEW_MODEL": str(models["review"]),
+        "GNB_LYRICS_SEPARATOR_MODEL": str(models["separator"]),
+        "GNB_LYRICS_ALIGNMENT_MODEL": str(models["alignment"]),
+        "GNB_LYRICS_TRANSCRIPTION_ENGINE": config.engine,
         "GNB_LYRICS_GPU_PYTHON": config.gpu_python_path,
         "GNB_LYRICS_VULKAN_BINARY": config.vulkan_binary,
         "GNB_LYRICS_VULKAN_MODEL": config.vulkan_model,
@@ -124,14 +130,7 @@ def require_runtime(config: ExtractionConfig, reference: str) -> None:
     missing = [name for name in dependencies if importlib.util.find_spec(name) is None]
     if missing:
         raise ValueError("The selected model Python is missing: " + ", ".join(missing) + ". Choose the existing lyric-model Python in Extraction settings, or install the optional lyric-runtime dependencies there.")
-    required = [Path(config.torch_home) / "hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth"]
-    models = Path(config.model_root)
-    if not reference:
-        required += [models / config.engine / "model.bin"]
-    if config.separate_vocals or config.auto_review:
-        required += [models / "htdemucs/spec.json", models / "htdemucs/model.safetensors"]
-    if config.auto_review:
-        required += [models / "medium.en/model.bin"]
+    required = required_model_files(config, reference=bool(reference))
     absent = [str(path) for path in required if not path.is_file()]
     if absent:
         raise ValueError("Local lyric models are not configured. Missing: " + "; ".join(absent) + ". Nothing was downloaded and existing lyrics were kept.")

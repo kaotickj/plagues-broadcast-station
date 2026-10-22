@@ -185,7 +185,8 @@ class MainWindow(QMainWindow):
 
     def _models_tab(self):
         page=QWidget(); v=QVBoxLayout(page); form=QFormLayout(); self.model_fields={}
-        for key,label in [('python_path','Lyric runtime Python'),('model_root','Model folder'),('torch_home','Torch model cache'),('gpu_python_path','GPU runtime Python'),('vulkan_binary','Whisper Vulkan executable'),('vulkan_model','Whisper Vulkan model'),('gpu_lock','Shared GPU lock (optional)')]:
+        v.addWidget(self._button('Set up / find models',self.open_model_setup,True))
+        for key,label in [('python_path','Lyric runtime Python'),('model_root','Model folder'),('torch_home','Torch model cache'),('transcription_model_path','Whisper large-v3 location'),('review_model_path','Independent review model location'),('separator_model_path','Vocal separator location'),('alignment_model_path','Word alignment checkpoint'),('ollama_url','Local Ollama address'),('ollama_model','Ollama text model'),('gpu_python_path','GPU runtime Python'),('vulkan_binary','Whisper Vulkan executable'),('vulkan_model','Whisper Vulkan model'),('gpu_lock','Shared GPU lock (optional)')]:
             entry=QLineEdit(str(getattr(self.extract_config,key))); entry.setAccessibleName(label); self.model_fields[key]=entry; form.addRow(label,entry)
         v.addLayout(form); self.gpu=QCheckBox('Use GPU when available; wait while another job uses it'); self.gpu.setChecked(self.extract_config.use_gpu); v.addWidget(self.gpu)
         v.addWidget(self._button('Save model settings',self.save_model_settings)); self.model_status=QLabel(''); self.model_status.setWordWrap(True); v.addWidget(self.model_status)
@@ -467,6 +468,21 @@ class MainWindow(QMainWindow):
         try:
             values=self.extract_config.to_dict(); values.update({key:entry.text().strip() for key,entry in self.model_fields.items()}); values['use_gpu']=self.gpu.isChecked(); self.extract_config=ExtractionConfig.from_dict(values); self.update_model_status(); self._schedule_save(); return True
         except Exception as error:self._message(str(error)); return False
+    def open_model_setup(self):
+        if self.export.running or self.extract_process.state()!=QProcess.ProcessState.NotRunning:
+            self._message('Finish the current output or extraction before changing model setup.');return
+        existing=getattr(self,'model_setup_dialog',None)
+        if existing and existing.isVisible():existing.raise_();existing.activateWindow();return
+        if existing:existing.deleteLater()
+        from .model_setup_dialog import ModelSetupDialog
+        self.model_setup_dialog=ModelSetupDialog(self.extract_config,self.data_dir,self)
+        self.model_setup_dialog.configured.connect(self._model_setup_applied)
+        self.model_setup_dialog.show()
+    def _model_setup_applied(self,config):
+        self.extract_config=ExtractionConfig.from_dict(config.to_dict())
+        for key,entry in self.model_fields.items():entry.setText(str(getattr(self.extract_config,key)))
+        self.gpu.setChecked(self.extract_config.use_gpu);self.update_model_status()
+        if self.save_session():self._message('Model settings saved. Selected recognizer: '+self.extract_config.engine)
     def update_model_status(self):
         status=config_status(self.extract_config); self.model_status.setText('Local lyric models detected.' if status['ready'] else 'Playback is ready. Lyric extraction needs a configured runtime and model files. '+ '; '.join(status['missing_models'][:2]))
 
@@ -503,13 +519,17 @@ class MainWindow(QMainWindow):
         try:
             write_profile(self.data_dir/'session.json',self.all_tracks,self.backgrounds,self.lyric_files,self.visual_settings(),self.profile_name)
             atomic_json(self.settings_file,{'extraction':self.extract_config.to_dict()})
-        except Exception as error:self._message('Could not save session: '+str(error))
+            return True
+        except Exception as error:self._message('Could not save session: '+str(error));return False
     def keyPressEvent(self,event):
         if event.key()==Qt.Key.Key_F11:self.show_output(); self.stage.showFullScreen(); event.accept()
         elif event.key()==Qt.Key.Key_Space and not isinstance(QApplication.focusWidget(),(QLineEdit,QPlainTextEdit)):
             self.toggle_play(); event.accept()
         else:super().keyPressEvent(event)
     def closeEvent(self,event):
+        setup=getattr(self,'model_setup_dialog',None)
+        if setup and (setup._busy or setup.tasks):
+            setup.close();event.ignore();QTimer.singleShot(500,self.close);return
         if self.export.running:
             answer=QMessageBox.question(self,'Finish broadcast?','Stop the output and close the station?',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)
             if answer!=QMessageBox.StandardButton.Yes:event.ignore(); return
@@ -526,6 +546,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument('--profile',type=Path); parser.add_argument('--data-dir',type=Path,default=default_data_dir())
     parser.add_argument('--show-output',action='store_true'); parser.add_argument('--autoplay',action='store_true')
+    parser.add_argument('--setup-models',action='store_true',help='Open the guided local model setup')
     args=parser.parse_args(argv)
     os.environ.setdefault('QT_MEDIA_BACKEND','ffmpeg')
     if getattr(sys,'frozen',False):
@@ -536,5 +557,6 @@ def main(argv=None):
     app=QApplication.instance() or QApplication(sys.argv[:1]); app.setApplicationName(APP_NAME); app.setOrganizationName('Plague Broadcast'); app.setStyleSheet(STYLE)
     window=MainWindow(args.data_dir,args.profile); window.show()
     if args.show_output:window.show_output()
+    if args.setup_models:QTimer.singleShot(0,window.open_model_setup)
     if args.autoplay:QTimer.singleShot(300,window.toggle_play)
     return app.exec()

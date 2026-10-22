@@ -134,13 +134,13 @@ def recognize(audio,sr,windows,engine,progress):
             try:return recognize_windows(audio,sr,windows,Path(folder),progress)
             except Exception as error:print('GPU review fallback:',type(error).__name__,str(error)[:200],flush=True)
     from faster_whisper import WhisperModel
-    from lyrics_pipeline import MODELS,release_memory
+    from lyrics_pipeline import model_path,release_memory
     model=None
-    model_path=str(MODELS/engine)
+    selected_model_path=str(model_path(engine,review=engine=='medium.en'))
     # Load the CPU model lazily; a cached full-song evidence pass needs none.
     # The timestamp/probability evidence remains private and source-specific.
     from lyrics_cache import evidence_path,read_evidence,write_evidence
-    model_factory=lambda:WhisperModel(model_path,device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
+    model_factory=lambda:WhisperModel(selected_model_path,device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
     result={}
     for n,(key,start,end) in enumerate(windows):
         clip=audio[round(start*sr):round(end*sr)]

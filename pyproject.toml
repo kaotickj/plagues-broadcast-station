@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plagues-broadcast-station"
-version = "0.1.0"
+version = "0.2.0"
 description = "A music, artwork and synchronized lyric broadcast station for Windows and Linux"
 requires-python = ">=3.11"
 dependencies = ["PySide6>=6.8,<7", "numpy>=1.26,<3"]
@@ -14,13 +14,13 @@ test = ["pytest>=8,<10"]
 build = ["pyinstaller>=6.10,<7"]
 
 [project.scripts]
-plagues-broadcast-station = "gnb_player.app:main"
+plagues-broadcast-station = "gnb_player.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-gnb_player = ["extraction_backend/*.py", "extract_worker.py", "extraction.py"]
+gnb_player = ["extraction_backend/*.py", "extract_worker.py", "extraction.py", "model_install.py", "model_install_worker.py", "model_discovery.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
