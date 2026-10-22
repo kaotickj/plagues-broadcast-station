@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1030, 720)
         self.all_tracks: list[Track] = []; self.backgrounds: list[Path] = []
         self.lyric_files: dict[str, str] = {}; self.documents = {}; self.tasks = []
-        self._lyric_stamps={}; self._invalid_lyrics=set()
+        self._lyric_stamps={}; self._invalid_lyrics=set(); self._lyric_requests={}
         self.profile_name = 'Goodneighbor Blues'; self._scan_busy = False
         self._extract_queue = []; self._extract_current = None; self._process_bytes = b''
         self._closing = False; self._seek_drag = False; self._track_generation = 0; self._displayed_track = None
@@ -235,6 +235,9 @@ class MainWindow(QMainWindow):
         if not self._seek_drag:self.seek.setValue(round(position/max(1,self.engine.duration)*10000))
     def _playing(self, playing):
         self.play_button.setText('Pause' if playing else 'Play'); self.stage.set_playback(self.engine.position,self.engine.duration,playing)
+        if playing and self.engine.current_track:
+            self._lyric_state(self.engine.current_track)
+            self._display_document(self.engine.current_track,self.documents.get(str(self.engine.current_track.path)))
         if not playing:self.export.clear_audio()
     def toggle_play(self):
         if self.engine.current_track is None and self.playlist.currentItem():self._play_item(self.playlist.currentItem())
@@ -247,7 +250,7 @@ class MainWindow(QMainWindow):
         path=track.path if track else None
         if track and path==self._displayed_track:return
         self._displayed_track=path
-        self._track_generation+=1; generation=self._track_generation; self.export.clear_audio()
+        self._track_generation+=1; self.export.clear_audio()
         if not track:
             self.stage.set_track(''); self.stage.set_lyrics(None); return
         self.stage.set_track(track.title,track.artist,track.album); self.stage.set_lyrics(None)
@@ -255,13 +258,27 @@ class MainWindow(QMainWindow):
         self.now_title.setText(track.title); self.now_artist.setText(' · '.join(x for x in [track.artist,track.album] if x))
         for i in range(self.playlist.count()):
             item=self.playlist.item(i)
-            if Path(item.data(Qt.ItemDataRole.UserRole))==track.path:self.playlist.setCurrentItem(item); break
+            if Path(item.data(Qt.ItemDataRole.UserRole))==track.path:
+                blocked=self.playlist.blockSignals(True); self.playlist.setCurrentItem(item); self.playlist.blockSignals(blocked); break
+        self._load_track_lyrics(track)
+    def _load_track_lyrics(self,track):
+        key=str(track.path); request=self._lyric_requests.get(key,0)+1; self._lyric_requests[key]=request
+        generation=self._track_generation
+        try:source_stamp=(track.path.stat().st_size,track.path.stat().st_mtime_ns)
+        except OSError:source_stamp=None
         def loaded(document):
-            if generation!=self._track_generation:return
+            if generation!=self._track_generation or request!=self._lyric_requests.get(key):return
+            try:unchanged=source_stamp==(track.path.stat().st_size,track.path.stat().st_mtime_ns)
+            except OSError:unchanged=False
+            if not unchanged:document=None
             self._remember_document(track,document)
-            self._display_document(track,document)
+            self._refresh_lyric_label(track)
+            self._display_relevant_document(track,document)
+        def failed(_):
+            if generation!=self._track_generation or request!=self._lyric_requests.get(key):return
+            self._remember_document(track,None); self._refresh_lyric_label(track); self._display_relevant_document(track,None)
         task=self._task(lambda:self._find_document(track),loaded)
-        task.failed.connect(lambda _:self._remember_document(track,None))
+        task.failed.connect(failed)
     def _remember_document(self,track,document):
         key=str(track.path)
         if document:
@@ -278,48 +295,73 @@ class MainWindow(QMainWindow):
         path=find_lyrics(track.path,Path(self.extract_config.cache_dir))
         return load_lyrics(path) if path else None
     def _display_document(self,track,document):
-        if document:
-            flagged=document.quality.get('status')=='review'; text='Draft · check the flagged passages before airing.' if flagged else 'Lyrics ready · synchronized to this recording.'
-            self.lyric_status.setText(text+(' '+ ' '.join(document.warnings[:2]) if document.warnings else ''))
+        on_air=self.engine.current_track and self.engine.current_track.path==track.path
+        if document and document.segments:
+            flagged=document.quality.get('status')=='review'; text='Preparation complete · lyrics need review before airing.' if flagged else 'Lyrics ready · synchronized to this recording.'
+            reasons=document.quality.get('reasons',[])
+            notes=[r['message'] for r in reasons if isinstance(r,dict) and isinstance(r.get('message'),str)] if flagged and isinstance(reasons,list) else []
+            notes=list(dict.fromkeys(notes+document.warnings))[:2]
+            self.lyric_status.setText(text+(' '+ ' '.join(notes) if notes else ''))
             self.lyric_text.setPlainText('\n'.join(c.text for c in document.segments))
-            self.stage.set_lyrics(document if not flagged or self.allow_drafts.isChecked() else None)
-        else:self.lyric_status.setText('No prepared lyrics for this recording yet.'); self.lyric_text.clear(); self.stage.set_lyrics(None)
+            if on_air:self.stage.set_lyrics(document if not flagged or self.allow_drafts.isChecked() else None)
+        else:
+            self.lyric_status.setText('No prepared lyrics for this recording yet.'); self.lyric_text.clear()
+            if on_air:self.stage.set_lyrics(None)
+    def _display_relevant_document(self,track,document):
+        shown=self.engine.current_track if self.engine.playing else self._selected_track()
+        if shown and shown.path==track.path:self._display_document(track,document)
     def _reload_current_lyrics(self):
-        t=self.engine.current_track
+        t=self.engine.current_track if self.engine.playing else self._selected_track()
         if not t:return
-        generation=self._track_generation; self.documents.pop(str(t.path),None);self.stage.set_lyrics(None)
-        def loaded(document):
-            if generation!=self._track_generation:return
-            self._remember_document(t,document);self._display_document(t,document)
-        task=self._task(lambda:self._find_document(t),loaded);task.failed.connect(lambda _:self._remember_document(t,None))
+        self.documents.pop(str(t.path),None)
+        if self.engine.current_track and self.engine.current_track.path==t.path:self.stage.set_lyrics(None)
+        self._load_track_lyrics(t)
     def _selection_changed(self,current,previous):
         if current and not self.engine.playing:
             t=next((t for t in self.all_tracks if str(t.path)==current.data(Qt.ItemDataRole.UserRole)),None)
-            if t:self.lyric_status.setText(t.title+' · '+('Lyrics prepared' if self._has_lyrics(t) else 'Lyrics not prepared'))
+            if t:
+                self.lyric_status.setText(t.title+' · '+self._lyric_state(t).title())
+                self._load_track_lyrics(t)
 
     def _has_lyrics(self,track):
+        return self._lyric_state(track)=='LYRICS READY'
+    def _lyric_state(self,track):
         key=str(track.path)
-        if key in self._invalid_lyrics:return False
+        if key in self._invalid_lyrics:return 'MUSIC ONLY'
         try:stamp=(track.path.stat().st_size,track.path.stat().st_mtime_ns)
-        except OSError:return False
+        except OSError:return 'MUSIC ONLY'
         if key in self._lyric_stamps and self._lyric_stamps[key]!=stamp:
-            self.documents.pop(key,None);self._invalid_lyrics.add(key);return False
+            self.documents.pop(key,None);self._invalid_lyrics.add(key);return 'MUSIC ONLY'
         document=self.documents.get(key)
         if document is None and self.lyric_files.get(key):
             try: document=load_lyrics(self.lyric_files[key]); self.documents[key]=document;self._lyric_stamps[key]=stamp
-            except (OSError,ValueError,TypeError): return False
-        return bool(document and document.segments and document.quality.get('status')!='review')
+            except (OSError,ValueError,TypeError): return 'MUSIC ONLY'
+        if not document or not document.segments:return 'MUSIC ONLY'
+        return 'LYRICS NEED REVIEW' if document.quality.get('status')=='review' else 'LYRICS READY'
+    def _playlist_text(self,track):
+        return f'{track.title}\n{track.artist or "Goodneighbor Blues"}  ·  {clock(track.duration)}  ·  {self._lyric_state(track)}'
+    def _refresh_lyric_label(self,track):
+        if self.ready_only.isChecked() and any(t.path==track.path for t in self.engine.tracks) and not self._has_lyrics(track):
+            self._apply_queue(); return
+        for i in range(self.playlist.count()):
+            item=self.playlist.item(i)
+            if item.data(Qt.ItemDataRole.UserRole)==str(track.path):item.setText(self._playlist_text(track))
+        self._filter_rows()
     def _apply_queue(self):
         selected=[t for t in self.all_tracks if not self.ready_only.isChecked() or self._has_lyrics(t)]
         self.engine.set_queue(selected); self._rebuild_list(selected); self._schedule_save()
     def _rebuild_list(self,tracks):
-        old=self.engine.current_track.path if self.engine.current_track else None
+        current=self.playlist.currentItem(); old=current.data(Qt.ItemDataRole.UserRole) if current else None
+        selected={item.data(Qt.ItemDataRole.UserRole) for item in self.playlist.selectedItems()}
+        if old is None and self.engine.current_track:old=str(self.engine.current_track.path)
         self.playlist.blockSignals(True); self.playlist.clear()
         for t in tracks:
-            status='LYRICS READY' if self._has_lyrics(t) else 'MUSIC ONLY'; item=QListWidgetItem(f'{t.title}\n{t.artist or "Goodneighbor Blues"}  ·  {clock(t.duration)}  ·  {status}')
+            item=QListWidgetItem(self._playlist_text(t))
             item.setData(Qt.ItemDataRole.UserRole,str(t.path)); item.setToolTip(str(t.path)); self.playlist.addItem(item)
-            if old==t.path:self.playlist.setCurrentItem(item)
-        if not old and self.playlist.count():self.playlist.setCurrentRow(0)
+            if old==str(t.path):self.playlist.setCurrentItem(item)
+        if not self.playlist.currentItem() and self.playlist.count():self.playlist.setCurrentRow(0)
+        if selected:
+            for i in range(self.playlist.count()):self.playlist.item(i).setSelected(self.playlist.item(i).data(Qt.ItemDataRole.UserRole) in selected)
         self.playlist.blockSignals(False); self.library_count.setText(f'{len(tracks)} tracks'); self._filter_rows()
     def _filter_rows(self):
         query=self.search.text().casefold()
@@ -393,9 +435,10 @@ class MainWindow(QMainWindow):
             target=cached_lyrics_path(track.path,Path(self.extract_config.cache_dir)); save_lyrics(document,target); return target,document
         self._task(work,lambda result:self._lyrics_ready(track,*result))
     def _lyrics_ready(self,track,target,document):
+        key=str(track.path); self._lyric_requests[key]=self._lyric_requests.get(key,0)+1
         self.lyric_files[str(track.path)]=str(target);self._remember_document(track,document)
-        if self.engine.current_track and self.engine.current_track.path==track.path:self._display_document(track,document)
         self._apply_queue(); self._schedule_save()
+        self._display_relevant_document(track,document)
     def queue_extraction(self,reference=False):
         track=self._selected_track()
         if not track:self._message('Choose a recording first.'); return

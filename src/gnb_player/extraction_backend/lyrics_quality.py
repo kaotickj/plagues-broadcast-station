@@ -1,6 +1,14 @@
 """Conservative publication gate; machine checks do not certify lyric accuracy."""
 import math,re,time
-VERSION='lyrics-qc-1'
+VERSION='lyrics-qc-2'
+
+# Hold likely credits/sign-offs for review; never remove their text. A bare
+# "thank you", or listening embedded in a lyric, is not enough evidence.
+_TRANSCRIPTION_ARTIFACT=re.compile(
+    r'\b(?:thanks? (?:you )?for watching|subscribe to (?:my|the) channel|subtitles by|amara\.org)\b'
+    r'|^\s*(?:thank\s+you|thanks)\s+for\s+listening[.!…\s]*$'
+    r'|(?:©|\(c\)|\bcopyright\b)\s*(?:\d{4}\s*)?transcript(?:ion)?\b'
+    r'|^\s*(?:transcript(?:ion)?|transcribed)\s+by\b',re.I)
 
 def assess(data):
     reasons=[]
@@ -37,7 +45,7 @@ def assess(data):
         repeats=repeats+1 if phrase and phrase==previous else 1
         if repeats>=4:flag('repetition','Check this repeated passage for recognition looping.',start)
         previous=phrase
-        if re.search(r'\b(?:thanks? (?:you )?for watching|subscribe to (?:my|the) channel|subtitles by|amara\.org)\b',text,re.I):flag('hallucination','A passage resembles a common transcription artifact.',start)
+        if _TRANSCRIPTION_ARTIFACT.search(text):flag('hallucination','A passage resembles a common transcription artifact.',start)
     for warning in data.get('warnings',[]):
         if warning:flag('model_warning','The extraction model left review warnings. Check the notes below.')
     count=len(words)
