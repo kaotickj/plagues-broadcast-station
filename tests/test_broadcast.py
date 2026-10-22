@@ -30,6 +30,10 @@ def test_arguments_are_separate_and_no_capture_device_or_shell_is_used(tmp_path)
     args=build_command(config,12345,12346)
     assert args[-1]==str(target.resolve())
     assert '-n' in args and 'libx264' in args and 'aac' in args
+    # Ubuntu 22.04 ships FFmpeg 4.4, which rejects the newer -fps_mode flag.
+    assert '-fps_mode' not in args
+    assert args[args.index('-vsync')+1]=='cfr'
+    assert args[args.index('-framerate')+1]==str(config.fps)
     assert 'tcp://127.0.0.1:12345?timeout=5000000' in args
     assert 'tcp://127.0.0.1:12346?timeout=5000000' in args
     assert not any(x in args for x in ['x11grab','gdigrab','dshow','pulse','alsa'])
