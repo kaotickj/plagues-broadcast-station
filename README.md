@@ -24,13 +24,23 @@ An on-screen waveform is a visual response to the decoded audio, not microphone 
 
 See [the OBS guide](docs/OBS.md) for scene and audio setup. No livestream is started merely by opening the app. Direct streaming requires an explicit start action and a destination/key supplied by the operator; stream keys are not saved in profiles.
 
+## Set up lyric models
+
+Open model setup from **Lyric models**, or start the app with `--setup-models`. The wizard scans known model/cache folders and folders you choose, shows compatible existing models and Python runtimes, and lets you reuse them. It also checks a local Ollama connection and lists its existing model tags. Scanning does not install or download anything.
+
+The preferred quality pack uses **Whisper large-v3** for transcription, **Whisper medium.en** for a second recognition pass, **HTDemucs** to separate vocals, and **wav2vec2** for word alignment. A full fresh setup downloads about **5.1 GB of weights**, plus the separate runtime. Allow roughly **12–14 GB of free space** for downloads, extraction and installation; the wizard shows the estimate for your selected plan. Compatible models found on disk are reused in place.
+
+Review the proposed locations and downloads, then choose **Install missing components** to proceed. If a compatible runtime and all four models are already available, choose **Validate and use existing models** for offline setup without downloads. Successful validation automatically saves the chosen runtime and model locations; failure or cancellation keeps the earlier settings. A compatible existing Python can be used to create an isolated model environment; Windows can also install a private supported Python when none is available. Existing model folders and Python environments are not replaced or removed. Administrator access is not required for a normal per-user Windows setup. Playback still works without the optional models.
+
+Ollama models use a different format and role: an Ollama model tag is a text-model connection, not a Whisper transcription model. Setup saves the selected local endpoint/tag without relocating Ollama's models, installing Ollama, or automatically pulling a language model. See [the model setup guide](docs/model-setup.md) for the scan, reuse, install and verification steps.
+
 ## Lyrics
 
 Supported imports are segment/word JSON, LRC, SRT and WebVTT. JSON may contain measured word times for karaoke highlighting. Ordinary LRC/subtitle files remain line-timed; the app does not invent word timing from the text.
 
-The included extraction routine separates the vocal, recognizes it with Whisper, aligns the words independently, and can perform a second model review. Choose a separate model Python environment and local model folders in Extraction settings. CPU mode works without a supported GPU; optional GPU tools and an advisory lock are configured explicitly. The app never downloads model weights on startup.
+The included extraction routine separates the vocal, recognizes it with Whisper, aligns the words independently, and can perform a second model review. Use the model setup wizard to find compatible existing models or explicitly install the quality pack, or configure the separate runtime and local model folders manually. CPU mode works without a supported GPU; optional GPU tools and an advisory lock are configured explicitly. The app never downloads model weights on startup.
 
-Default model/cache folders live under the application's user data directory. A model Python executable must be selected explicitly. The player itself does not need Torch. [Model setup, cancellation and output details](docs/lyrics-backend.md) explain the optional backend and environment settings. `requirements-lyrics.txt` is for a separate CPU model environment; its Torch/TorchAudio versions are pinned below 2.9 to retain the forced-alignment API.
+Default model/cache folders live under the application's user data directory. The setup wizard configures the selected model Python and model locations after validation; existing manual settings remain available. The player itself does not need Torch. [Cancellation and output details](docs/lyrics-backend.md) explain the optional backend and environment settings. `requirements-lyrics.txt` is for a separate CPU model environment; its Torch/TorchAudio versions are pinned below 2.9 to retain the forced-alignment API.
 
 In a source checkout, FFmpeg and ffprobe must be on PATH for extraction and metadata probing. Native packages include FFmpeg and ffprobe executables with their dependencies for recording/direct streaming. Source runs require those tools on PATH. Existing timed lyric imports work without the model environment.
 
@@ -62,7 +72,7 @@ To select a particular profile:
 
 Run `./build-linux.sh` on Linux or `./build-windows.ps1` in Windows PowerShell. These install build dependencies into `.venv`, run tests, then create a one-folder native package with PyInstaller. Keep the resulting folder intact. ZIPs are written under `artifacts/`.
 
-The GitHub Actions workflow builds Linux and Windows separately on standard hosted runners. It uses no GPU runners, model downloads, private media or livestream credentials. A Windows executable must be built on Windows; a successful Linux build is not evidence that a Windows build passed. Native build artifacts and test results should be checked before calling a release tested on that platform.
+The GitHub Actions workflow builds Linux and Windows separately on standard hosted runners. It uses no GPU runners, model downloads, private media or livestream credentials. Packaged checks start the normal GUI and model setup wizard, exercise the installer worker's refusal to run without an explicit install action, and check bundled media tools. A Windows executable must be built on Windows; a successful Linux build is not evidence that a Windows build passed. Native build artifacts and test results should be checked before calling a release tested on that platform.
 
 The spec bundles FFmpeg/ffprobe and their native dependencies, retains Qt Multimedia and its playback backend dependencies, and excludes WebEngine, PDF and the heavyweight AI libraries from the GUI bundle. Builds fail clearly if the FFmpeg tools are absent. External-worker Python sources are bundled as data so the selected model Python can execute them. The optional models remain outside the package.
 

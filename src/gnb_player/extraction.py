@@ -4,9 +4,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import json
+import ipaddress
 import os
 import shutil
 import sys
+from urllib.parse import urlsplit
 
 
 def default_data_dir() -> Path:
@@ -26,6 +28,12 @@ class ExtractionConfig:
     gpu_lock: str = ""
     cache_dir: str = ""
     media_library_path: str = ""
+    transcription_model_path: str = ""
+    review_model_path: str = ""
+    separator_model_path: str = ""
+    alignment_model_path: str = ""
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = ""
     use_gpu: bool = True
     wait_for_gpu: bool = True
     gpu_wait_seconds: int = 900
@@ -43,7 +51,7 @@ class ExtractionConfig:
             raise ValueError("Extraction settings must be a JSON object.")
         known = cls.__dataclass_fields__
         config = cls(**{key: value for key, value in values.items() if key in known})
-        for name in ("python_path", "model_root", "torch_home", "gpu_python_path", "vulkan_binary", "vulkan_model", "gpu_lock", "cache_dir", "media_library_path", "engine"):
+        for name in ("python_path", "model_root", "torch_home", "gpu_python_path", "vulkan_binary", "vulkan_model", "gpu_lock", "cache_dir", "media_library_path", "transcription_model_path", "review_model_path", "separator_model_path", "alignment_model_path", "ollama_url", "ollama_model", "engine"):
             value = getattr(config, name)
             if not isinstance(value, str) or len(value) > 4096 or "\x00" in value:
                 raise ValueError("Invalid extraction path or model setting.")
@@ -56,7 +64,52 @@ class ExtractionConfig:
             raise ValueError("GPU wait must be between zero and 3600 seconds.")
         if config.engine not in {"large-v3", "medium.en", "small.en"}:
             raise ValueError("Choose an installed Whisper model: large-v3, medium.en or small.en.")
+        config.ollama_url = local_ollama_url(config.ollama_url)
+        if len(config.ollama_model) > 300 or any(ord(c) < 32 for c in config.ollama_model):
+            raise ValueError("Choose a valid installed Ollama model name.")
         return config
+
+
+def local_ollama_url(value: str) -> str:
+    """A text-model connection stays on this machine and contains no credentials."""
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("Use a local Ollama URL such as http://127.0.0.1:11434.")
+    host = parsed.hostname or ""
+    if host.lower() == "localhost":
+        host = "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(host)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        raise ValueError("The Ollama URL must use a valid local loopback address.") from error
+    if not address.is_loopback or not 1 <= port <= 65535:
+        raise ValueError("The Ollama URL must use a valid local loopback address and port.")
+    hostname = f"[{address}]" if address.version == 6 else str(address)
+    return f"{parsed.scheme}://{hostname}:{port}"
+
+
+def effective_model_paths(config: ExtractionConfig) -> dict[str, Path]:
+    """Explicit components can live in different caches without copying weights."""
+    root = Path(config.model_root).expanduser()
+    return {
+        "transcription": Path(config.transcription_model_path).expanduser() if config.transcription_model_path else root / config.engine,
+        "review": Path(config.review_model_path).expanduser() if config.review_model_path else root / "medium.en",
+        "separator": Path(config.separator_model_path).expanduser() if config.separator_model_path else root / "htdemucs",
+        "alignment": Path(config.alignment_model_path).expanduser() if config.alignment_model_path else Path(config.torch_home).expanduser() / "hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth",
+    }
+
+
+def required_model_files(config: ExtractionConfig, *, reference: bool = False) -> list[Path]:
+    paths = effective_model_paths(config)
+    required = [paths["alignment"]]
+    if not reference:
+        required += [paths["transcription"] / "model.bin"]
+    if config.separate_vocals or config.auto_review:
+        required += [paths["separator"] / "spec.json", paths["separator"] / "model.safetensors"]
+    if config.auto_review:
+        required += [paths["review"] / "model.bin"]
+    return required
 
 
 def discover_config() -> ExtractionConfig:
@@ -75,6 +128,12 @@ def discover_config() -> ExtractionConfig:
         gpu_lock=os.environ.get("GNB_PLAYER_GPU_LOCK", ""),
         cache_dir=os.environ.get("GNB_PLAYER_CACHE_DIR", str(base / "extraction-cache")),
         media_library_path=os.environ.get("GNB_PLAYER_MEDIA_LIBRARY_PATH", str(getattr(sys, "_MEIPASS", ""))),
+        transcription_model_path=os.environ.get("GNB_PLAYER_TRANSCRIPTION_MODEL", ""),
+        review_model_path=os.environ.get("GNB_PLAYER_REVIEW_MODEL", ""),
+        separator_model_path=os.environ.get("GNB_PLAYER_SEPARATOR_MODEL", ""),
+        alignment_model_path=os.environ.get("GNB_PLAYER_ALIGNMENT_MODEL", ""),
+        ollama_url=os.environ.get("GNB_PLAYER_OLLAMA_URL", "http://127.0.0.1:11434"),
+        ollama_model=os.environ.get("GNB_PLAYER_OLLAMA_MODEL", ""),
         use_gpu=bool(gpu_python or vulkan),
     )
 
@@ -90,13 +149,7 @@ def media_environment(library_path: str = "") -> dict[str, str]:
 
 def config_status(config: ExtractionConfig) -> dict:
     """Cheap discovery only; never load a model or contact a download service."""
-    model_root = Path(config.model_root)
-    requirements = [model_root / config.engine / "model.bin"]
-    if config.separate_vocals:
-        requirements += [model_root / "htdemucs/spec.json", model_root / "htdemucs/model.safetensors"]
-    requirements += [Path(config.torch_home) / "hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth"]
-    if config.auto_review:
-        requirements += [model_root / "medium.en/model.bin"]
+    requirements = required_model_files(config)
     missing = [str(path) for path in requirements if not path.is_file()]
     python_exists = bool(config.python_path and (Path(config.python_path).is_file() or shutil.which(config.python_path)))
     return {"ready": python_exists and not missing and bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe")),

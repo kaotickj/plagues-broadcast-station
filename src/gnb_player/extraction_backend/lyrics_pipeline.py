@@ -13,6 +13,36 @@ ENGINES = ('large-v3', 'medium.en', 'qwen3-asr-1.7b', 'qwen3-asr-0.6b', 'small.e
 VERSION = 'singing-3'
 
 
+def model_path(engine, *, review=False):
+    """Route each recognizer to its own chosen cache, including large rechecks."""
+    selected = os.environ.get('GNB_LYRICS_TRANSCRIPTION_ENGINE', 'large-v3')
+    primary = os.environ.get('GNB_LYRICS_TRANSCRIPTION_MODEL', '')
+    secondary = os.environ.get('GNB_LYRICS_REVIEW_MODEL', '')
+    if review and engine == 'medium.en' and secondary:
+        return Path(secondary)
+    if engine == selected and primary:
+        return Path(primary)
+    if engine == 'medium.en' and secondary:
+        return Path(secondary)
+    return MODELS / engine
+
+
+def separator_path():
+    chosen = os.environ.get('GNB_LYRICS_SEPARATOR_MODEL', '')
+    return Path(chosen) if chosen else MODELS / 'htdemucs'
+
+
+def load_alignment_model(bundle, checkpoint, device):
+    """Re-use an exact local file before calling TorchAudio's cache loader."""
+    checkpoint = Path(checkpoint)
+    if not checkpoint.is_file():
+        raise ValueError('The local lyric alignment model has not been installed.')
+    # load_state_dict_from_url reuses model_dir/file_name when that file exists.
+    # The explicit existence guard prevents a missing selected file downloading.
+    return bundle.get_model(dl_kwargs={'model_dir': str(checkpoint.parent),
+                                      'file_name': checkpoint.name}).to(device)
+
+
 def release_memory():
     gc.collect()
     try:
@@ -93,9 +123,10 @@ def separate_vocals(source, target, work, progress):
     from demucs.htdemucs import HTDemucs
     from demucs.apply import apply_model
     from safetensors.torch import load_file
-    spec = json.loads((MODELS / 'htdemucs/spec.json').read_text())
+    separator = separator_path()
+    spec = json.loads((separator / 'spec.json').read_text())
     model = HTDemucs(*spec['args'], **spec['kwargs'])
-    model.load_state_dict(load_file(str(MODELS / 'htdemucs/model.safetensors')))
+    model.load_state_dict(load_file(str(separator / 'model.safetensors')))
     device='cuda' if os.environ.get('GNB_GPU_HELPER_ACTIVE') and torch.cuda.is_available() else 'cpu'
     model.eval().to(device)
     mix = work / 'mix.wav'
@@ -204,11 +235,12 @@ def align_reference(audio, sr, lines, progress):
     import torchaudio.functional as F
     bundle = torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H
     # Preload at installation. Runtime has no network access.
-    checkpoint = Path(torch.hub.get_dir())/'checkpoints'/bundle._path
+    selected = os.environ.get('GNB_LYRICS_ALIGNMENT_MODEL', '')
+    checkpoint = Path(selected) if selected else Path(torch.hub.get_dir())/'checkpoints'/bundle._path
     if not checkpoint.is_file():
         raise ValueError('The local lyric alignment model has not been installed.')
     device='cuda' if os.environ.get('GNB_GPU_HELPER_ACTIVE') and torch.cuda.is_available() else 'cpu'
-    model = bundle.get_model().to(device)
+    model = load_alignment_model(bundle, checkpoint, device)
     labels = {label:i for i,label in enumerate(bundle.get_labels())}
     emissions = []
     times = []
@@ -309,7 +341,7 @@ def alignment_incomplete(words, text):
 
 def transcribe_whisper(audio, engine, progress, title=''):
     from faster_whisper import WhisperModel
-    model = WhisperModel(str(MODELS/engine),device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
+    model = WhisperModel(str(model_path(engine)),device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
     segments, info = model.transcribe(audio, language='en', word_timestamps=True,
                                      condition_on_previous_text=False, beam_size=1,
                                      vad_filter=False, no_speech_threshold=.8,
