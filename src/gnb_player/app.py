@@ -3,17 +3,17 @@ from __future__ import annotations
 import argparse, json, os, sys
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QProcess, QProcessEnvironment, QSize
-from PySide6.QtGui import QPixmap, QFont, QIcon
+from PySide6.QtGui import QPixmap, QFont, QIcon, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QAbstractItemView,
     QFileDialog, QMessageBox, QTabWidget, QLineEdit, QPlainTextEdit, QSlider,
     QCheckBox, QDoubleSpinBox, QSpinBox, QFormLayout, QComboBox, QProgressBar,
-    QSplitter, QGroupBox, QScrollArea,
+    QSplitter, QGroupBox, QScrollArea, QColorDialog,
 )
 from .library import Track, scan_media, MEDIA_EXTENSIONS
 from .playback import PlaybackEngine
-from .stage import BroadcastStage, IMAGE_SUFFIXES, VIDEO_SUFFIXES
+from .stage import BroadcastStage, IMAGE_SUFFIXES, VIDEO_SUFFIXES, DEFAULT_WAVEFORM_COLOR, waveform_color
 from .lyrics import load_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path
 from .extraction import ExtractionConfig, discover_config, config_status, build_command, parse_worker_event, default_data_dir
 from .settings import atomic_json, read_profile, write_profile, load_m3u, save_m3u, starter_profile
@@ -159,7 +159,13 @@ class MainWindow(QMainWindow):
         self.brand=QLineEdit('GOODNEIGHBOR BLUES'); self.tagline=QLineEdit('Original blues. Stay awhile.'); form.addRow('Station name',self.brand); form.addRow('Station line',self.tagline)
         self.interval=QSpinBox(); self.interval.setRange(5,300); self.interval.setValue(18); self.interval.setSuffix(' seconds'); form.addRow('Change backdrop every',self.interval)
         self.motion=QCheckBox('Gentle motion and crossfades'); self.motion.setChecked(True); self.wave=QCheckBox('Audio waveform'); self.wave.setChecked(True); self.lyrics_visible=QCheckBox('Show sing-along lyrics'); self.lyrics_visible.setChecked(True)
-        form.addRow(self.motion); form.addRow(self.wave); form.addRow(self.lyrics_visible); v.addLayout(form)
+        form.addRow(self.motion); form.addRow(self.wave)
+        self._waveform_color=DEFAULT_WAVEFORM_COLOR
+        self.wave_color=self._button(self._waveform_color,self.choose_waveform_color)
+        self.wave_color.setAccessibleName("Choose waveform color")
+        self.wave_color.setToolTip("Changes the audio waveform in the preview, Program Output and recordings.")
+        form.addRow("Waveform color",self.wave_color); self._update_waveform_color_button()
+        form.addRow(self.lyrics_visible); v.addLayout(form)
         row=QHBoxLayout(); row.addWidget(self._button('Add artwork / videos',self.add_backgrounds)); row.addWidget(self._button('Previous backdrop',self.stage.previous_background)); row.addWidget(self._button('Next backdrop',self.stage.next_background)); v.addLayout(row)
         self.art_count=QLabel('No artwork loaded'); self.art_count.setObjectName('muted'); v.addWidget(self.art_count)
         for widget in [self.brand,self.tagline]: widget.textChanged.connect(self.apply_appearance)
@@ -397,6 +403,7 @@ class MainWindow(QMainWindow):
         settings=data.get('settings',{}); self.brand.setText(settings.get('brand','GOODNEIGHBOR BLUES')); self.tagline.setText(settings.get('tagline','Original blues. Stay awhile.'))
         self.interval.setValue(max(5,min(300,int(settings.get('interval_seconds',18)))))
         for key,widget in [('motion',self.motion),('waveform',self.wave),('lyrics',self.lyrics_visible)]:widget.setChecked(bool(settings.get(key,True)))
+        self.set_waveform_color(settings.get('waveform_color',DEFAULT_WAVEFORM_COLOR))
         self.documents.clear();self._lyric_stamps.clear();self._invalid_lyrics.clear();self.engine.set_queue([],preserve_current=False); self.ready_only.setChecked(bool(data.get('settings',{}).get('lyrics_ready_only',False))); self._apply_queue(); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self.apply_appearance()
         self._message(f'{self.profile_name}: {len(self.all_tracks)} recordings and {len(self.lyric_files)} prepared lyric files loaded.')
     def save_playlist(self):
@@ -410,7 +417,18 @@ class MainWindow(QMainWindow):
     def add_backgrounds(self):
         paths,_=QFileDialog.getOpenFileNames(self,'Add artwork or looping video','','Artwork and video ('+' '.join('*'+x for x in sorted(IMAGE_SUFFIXES|VIDEO_SUFFIXES))+')')
         self.backgrounds=list(dict.fromkeys(self.backgrounds+[Path(p).resolve() for p in paths])); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self._schedule_save()
-    def visual_settings(self):return {'brand':self.brand.text(),'tagline':self.tagline.text(),'interval_seconds':self.interval.value(),'motion':self.motion.isChecked(),'waveform':self.wave.isChecked(),'lyrics':self.lyrics_visible.isChecked(),'lyrics_ready_only':self.ready_only.isChecked()}
+    def visual_settings(self):return {'brand':self.brand.text(),'tagline':self.tagline.text(),'interval_seconds':self.interval.value(),'motion':self.motion.isChecked(),'waveform':self.wave.isChecked(),'waveform_color':self._waveform_color,'lyrics':self.lyrics_visible.isChecked(),'lyrics_ready_only':self.ready_only.isChecked()}
+    def _update_waveform_color_button(self):
+        color=QColor(self._waveform_color)
+        text='#101c24' if color.lightnessF()>.5 else '#ffffff'
+        self.wave_color.setText(self._waveform_color.upper()+' · Choose…')
+        self.wave_color.setStyleSheet(f'background:{self._waveform_color};color:{text};')
+    def set_waveform_color(self,value):
+        self._waveform_color=waveform_color(value)
+        self._update_waveform_color_button(); self.apply_appearance()
+    def choose_waveform_color(self):
+        color=QColorDialog.getColor(QColor(self._waveform_color),self,'Waveform color')
+        if color.isValid():self.set_waveform_color(color.name())
     def apply_appearance(self):
         settings=self.visual_settings(); settings.pop('lyrics_ready_only',None); self.stage.set_visual_settings(**settings); self._schedule_save()
     def show_output(self):self.stage.show(); self.stage.raise_()
