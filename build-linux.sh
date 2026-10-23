@@ -8,11 +8,13 @@ fi
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install '.[build,test]'
 QT_QPA_PLATFORM=offscreen QT_MEDIA_BACKEND=ffmpeg .venv/bin/python -m pytest -q
+.venv/bin/python scripts/build_linux_installer.py --record-source
 .venv/bin/python -m PyInstaller --clean --noconfirm PlaguesBroadcastStation.spec
 cp run-linux.sh dist/PlaguesBroadcastStation/run-linux.sh
-cp README.md THIRD_PARTY_NOTICES.md requirements-lyrics.txt dist/PlaguesBroadcastStation/
+cp README.md INSTALLER.md THIRD_PARTY_NOTICES.md requirements-lyrics.txt dist/PlaguesBroadcastStation/
 cp -R docs dist/PlaguesBroadcastStation/
 chmod +x dist/PlaguesBroadcastStation/run-linux.sh
+.venv/bin/python scripts/build_linux_installer.py
 mkdir -p artifacts
 .venv/bin/python - <<'PY'
 from pathlib import Path

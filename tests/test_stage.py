@@ -123,3 +123,32 @@ def test_closing_presentation_does_not_freeze_native_composition(stage):
     with patch('gnb_player.stage.time.monotonic',return_value=stage._last_tick+.1):stage._tick()
     assert stage._visual_seconds>before
     stage.shutdown();assert stage._disposed and not stage._timer.isActive()
+
+
+def test_waveform_color_changes_only_waveform_region_and_preserves_pcm(stage):
+    # Exercise the same full-frame painter used by preview, Program Output and export.
+    stage._wave_display[:]=.2
+    original=stage._wave_display.copy()
+    gold=stage.render_frame(1280,720)
+    stage.set_visual_settings(waveform_color='#39FF14')
+    green=stage.render_frame(1280,720)
+    assert stage._settings['waveform_color']=='#39ff14'
+    assert np.array_equal(stage._wave_display,original)
+    gold_pixels=green_pixels=0
+    for y in range(630,690):
+        for x in range(295,985):
+            gold_pixels+=gold.pixelColor(x,y).name()=='#dfbd7f'
+            green_pixels+=green.pixelColor(x,y).name()=='#39ff14'
+    assert gold_pixels>100 and green_pixels==gold_pixels
+    assert gold.copy(0,0,1280,630)==green.copy(0,0,1280,630)
+    stage.set_visual_settings(waveform=False)
+    hidden=stage.render_frame(1280,720)
+    assert all(hidden.pixelColor(x,659).name()!='#39ff14' for x in range(300,980))
+
+
+@pytest.mark.parametrize('invalid',[None,{},123,'not-a-color',''])
+def test_invalid_profile_waveform_color_uses_legacy_default(stage,invalid):
+    stage.set_visual_settings(waveform_color='#39ff14')
+    stage.set_visual_settings(waveform_color=invalid)
+    assert stage._settings['waveform_color']=='#dfbd7f'
+    assert not stage.render_frame(640,360).isNull()

@@ -41,6 +41,9 @@ class ExtractionConfig:
     auto_review: bool = True
     cpu_threads: int = 2
     engine: str = "large-v3"
+    recognition_language: str = "en"
+    recognition_task: str = "transcribe"
+    recognition_prompt: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -64,6 +67,19 @@ class ExtractionConfig:
             raise ValueError("GPU wait must be between zero and 3600 seconds.")
         if config.engine not in {"large-v3", "medium.en", "small.en"}:
             raise ValueError("Choose an installed Whisper model: large-v3, medium.en or small.en.")
+        language = config.recognition_language
+        if not isinstance(language, str):
+            raise ValueError("Choose auto or a two/three-letter recognition language code.")
+        language = language.strip().lower()
+        if language != "auto" and not (len(language) in (2, 3) and language.isascii() and language.isalpha()):
+            raise ValueError("Choose auto or a two/three-letter recognition language code.")
+        config.recognition_language = language
+        if config.recognition_task != "transcribe":
+            raise ValueError("Lyrics must use transcription, not translation.")
+        prompt = config.recognition_prompt
+        if (not isinstance(prompt, str) or len(prompt) > 500
+                or any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in prompt)):
+            raise ValueError("Recognition context must be plain text of at most 500 characters.")
         config.ollama_url = local_ollama_url(config.ollama_url)
         if len(config.ollama_model) > 300 or any(ord(c) < 32 for c in config.ollama_model):
             raise ValueError("Choose a valid installed Ollama model name.")
@@ -134,6 +150,8 @@ def discover_config() -> ExtractionConfig:
         alignment_model_path=os.environ.get("GNB_PLAYER_ALIGNMENT_MODEL", ""),
         ollama_url=os.environ.get("GNB_PLAYER_OLLAMA_URL", "http://127.0.0.1:11434"),
         ollama_model=os.environ.get("GNB_PLAYER_OLLAMA_MODEL", ""),
+        recognition_language=os.environ.get("GNB_PLAYER_RECOGNITION_LANGUAGE", "en"),
+        recognition_prompt=os.environ.get("GNB_PLAYER_RECOGNITION_PROMPT", ""),
         use_gpu=bool(gpu_python or vulkan),
     )
 

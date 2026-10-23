@@ -24,6 +24,14 @@ from PySide6.QtWidgets import QWidget
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi"}
 BASE_W, BASE_H = 1280.0, 720.0
+DEFAULT_WAVEFORM_COLOR = "#dfbd7f"
+
+
+def waveform_color(value: Any) -> str:
+    """Normalize profile colors to an opaque RGB value, with a legacy default."""
+    color = QColor(value) if isinstance(value, str) else QColor()
+    return color.name() if color.isValid() else DEFAULT_WAVEFORM_COLOR
+
 
 
 @dataclass
@@ -75,7 +83,8 @@ class BroadcastStage(QWidget):
         self._settings: dict[str, Any] = {
             "brand": "GOODNEIGHBOR BLUES", "tagline": "Original blues. Stay awhile.",
             "interval_seconds": 18.0, "fade_seconds": 1.8, "motion": True,
-            "waveform": True, "lyrics": True, "slideshow_paused": False,
+            "waveform": True, "waveform_color": DEFAULT_WAVEFORM_COLOR,
+            "lyrics": True, "slideshow_paused": False,
         }
         self._title, self._artist, self._album = "", "", ""
         self._position, self._duration, self._playing = 0.0, 0.0, False
@@ -166,6 +175,7 @@ class BroadcastStage(QWidget):
         for key in self._settings:
             if key in kwargs:
                 self._settings[key] = kwargs[key]
+        self._settings["waveform_color"] = waveform_color(self._settings["waveform_color"])
         self._settings["brand"] = str(self._settings["brand"])[:120]
         self._settings["tagline"] = str(self._settings["tagline"])[:200]
         self._settings["interval_seconds"] = max(5.0, min(300.0, _finite(self._settings["interval_seconds"], 18)))
@@ -514,9 +524,11 @@ class BroadcastStage(QWidget):
 
     def _draw_waveform(self, p: QPainter, rect: QRectF) -> None:
         middle = rect.center().y()
-        p.setPen(QPen(QColor(195, 162, 104, 70), 1))
+        color = QColor(self._settings["waveform_color"])
+        baseline = QColor(color); baseline.setAlpha(70)
+        p.setPen(QPen(baseline, 1))
         p.drawLine(rect.left(), middle, rect.right(), middle)
-        p.setPen(QPen(QColor("#dfbd7f"), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         count = len(self._wave_display)
         for i, raw in enumerate(self._wave_display):
             taper = .28 + .72 * math.sin(math.pi * (i + .5) / count)

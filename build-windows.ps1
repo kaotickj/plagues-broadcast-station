@@ -21,7 +21,7 @@ try {
     Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 }
 Copy-Item 'run-windows.bat' 'dist\PlaguesBroadcastStation\run-windows.bat' -Force
-Copy-Item 'README.md','THIRD_PARTY_NOTICES.md','requirements-lyrics.txt' 'dist\PlaguesBroadcastStation' -Force
+Copy-Item 'README.md','INSTALLER.md','THIRD_PARTY_NOTICES.md','requirements-lyrics.txt' 'dist\PlaguesBroadcastStation' -Force
 Copy-Item 'docs' 'dist\PlaguesBroadcastStation' -Recurse -Force
 New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
 Compress-Archive -Path 'dist\PlaguesBroadcastStation' -DestinationPath 'artifacts\PlaguesBroadcastStation-windows-x86_64.zip' -Force
