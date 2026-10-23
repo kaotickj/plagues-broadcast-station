@@ -71,6 +71,9 @@ time cannot substitute for content-change time. The candidate now uses native
 for both recordings and stored lyric files. The original mutation/revocation
 assertion remains in the suite. A path-dependent test mock was made portable.
 CI checks out the exact PR head so artifact provenance identifies that commit.
+The recording integration fixture waits for the encoder's ready signal before
+timing ten seconds; its duration, synchronization and real-tone assertions remain
+unchanged, excluding variable input-handshake latency from the measurement.
 
 Native package receipts, exact artifact hashes and rollback details accompany
 the candidate separately. Linux-host validation does not certify Windows or
