@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from hashlib import file_digest
+from hashlib import file_digest, sha256
 from pathlib import Path
 from typing import Any
 import json
@@ -20,6 +22,7 @@ class Word:
     text: str
     start: float
     end: float
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +31,7 @@ class Cue:
     start: float
     end: float
     words: list[Word] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -38,6 +42,8 @@ class LyricsDocument:
     source_sha256: str = ""
     warnings: list[str] = field(default_factory=list)
     quality: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    human_review: dict[str, Any] = field(default_factory=dict)
 
     def active_cue(self, seconds: float) -> Cue | None:
         if not math.isfinite(seconds) or seconds < 0 or not self.segments:
@@ -56,14 +62,16 @@ class LyricsDocument:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": "broadcast-player-lyrics-1",
+            **deepcopy(self.metadata),
+            "version": self.metadata.get("version", "broadcast-player-lyrics-1"),
             "title": self.title,
-            "duration": self.duration,
+            "duration": float(self.duration),
             "source_sha256": self.source_sha256,
-            "warnings": self.warnings,
-            "quality": self.quality,
-            "segments": [{"start": c.start, "end": c.end, "text": c.text,
-                          "words": [{"text": w.text, "start": w.start, "end": w.end}
+            "warnings": deepcopy(self.warnings),
+            "quality": deepcopy(self.quality),
+            "human_review": deepcopy(self.human_review),
+            "segments": [{**deepcopy(c.metadata), "start": float(c.start), "end": float(c.end), "text": c.text,
+                          "words": [{**deepcopy(w.metadata), "text": w.text, "start": float(w.start), "end": float(w.end)}
                                     for w in c.words]} for c in self.segments],
         }
 
@@ -74,7 +82,7 @@ class LyricsDocument:
         raw = data.get("segments", [])
         if not isinstance(raw, list) or len(raw) > 10000:
             raise ValueError("The lyric file has too many lines or an invalid line list.")
-        warnings = [str(value)[:1000] for value in data.get("warnings", [])[:100]] if isinstance(data.get("warnings"), list) else []
+        warnings = [str(value) for value in data.get("warnings", [])] if isinstance(data.get("warnings"), list) else []
         cues: list[Cue] = []
         invalid_words = False
         for item in raw:
@@ -88,11 +96,13 @@ class LyricsDocument:
                     a, b = _interval(word.get("start"), word.get("end"))
                     if a < start - .1 or b > end + .1:
                         raise ValueError("Word outside its line")
-                    words.append(Word(str(word.get("text", ""))[:1000], a, b))
+                    extras = {key: deepcopy(value) for key, value in word.items() if key not in {"text", "start", "end"}}
+                    words.append(Word(str(word.get("text", ""))[:1000], a, b, extras))
                 except (AttributeError, ValueError, TypeError):
                     invalid_words = True
             if text.strip():
-                cues.append(Cue(text, start, end, sorted(words, key=lambda value: value.start)))
+                extras = {key: deepcopy(value) for key, value in item.items() if key not in {"text", "start", "end", "words"}}
+                cues.append(Cue(text, start, end, sorted(words, key=lambda value: value.start), extras))
         cues.sort(key=lambda cue: cue.start)
         if invalid_words:
             warnings.append("Some imported words had invalid timing; their line text is retained without guessed word timing.")
@@ -103,7 +113,19 @@ class LyricsDocument:
         if fingerprint and not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
             raise ValueError("The lyric file contains an invalid source fingerprint.")
         quality = data.get("quality") if isinstance(data.get("quality"), dict) else {}
-        return cls(cues, supplied_duration, str(data.get("title", ""))[:1000], fingerprint.lower(), warnings, quality)
+        extras = {key: deepcopy(value) for key, value in data.items()
+                  if key not in {"title", "duration", "source_sha256", "warnings", "quality", "segments", "human_review"}
+                  and not (key == "version" and value == "broadcast-player-lyrics-1")}
+        review = deepcopy(data.get("human_review")) if isinstance(data.get("human_review"), dict) else {}
+        result = cls(cues, supplied_duration, str(data.get("title", ""))[:1000], fingerprint.lower(), warnings, deepcopy(quality), extras, review)
+        result._review_base_state = _review_state_digest(result)
+        return result
+
+
+def _review_state_digest(document: LyricsDocument) -> str:
+    """Ephemeral concurrency token including approval/revocation audit fields."""
+    payload = json.dumps(document.to_dict(), sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _finite(value: Any) -> float:
@@ -187,9 +209,46 @@ def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
     return LyricsDocument.from_dict(json.loads(text), duration)
 
 
+@contextmanager
+def lyric_write_lock(target: str | Path):
+    """Serialize cooperating manual/import/extraction writers, without Qt."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = target.with_name("." + target.name + ".review.lock")
+    if lock.is_symlink():
+        raise ValueError("Refusing a symbolic-link lyric write lock.")
+    with lock.open("a+b") as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                if handle.seek(0, os.SEEK_END) == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError("Another lyric write is in progress. Retry after it finishes.") from None
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def save_lyrics(document: LyricsDocument, path: str | Path) -> None:
     """Atomic local save. Failed imports/extraction cannot leave a partial sidecar."""
     target = Path(path)
+    with lyric_write_lock(target):
+        _save_lyrics_unlocked(document, target)
+
+
+def _save_lyrics_unlocked(document: LyricsDocument, target: Path) -> None:
     if target.is_symlink():
         raise ValueError("Choose a regular lyric file, not a symbolic link.")
     payload = json.dumps(document.to_dict(), ensure_ascii=False, allow_nan=False, indent=2)

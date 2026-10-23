@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication
 from gnb_player.app import MainWindow
 from gnb_player.library import Track
 from gnb_player.lyrics import LyricsDocument,Cue,save_lyrics,fingerprint
+from gnb_player.lyric_review import approve_document
 from gnb_player.settings import write_profile
 
 @pytest.fixture
@@ -49,6 +50,7 @@ def test_sidecar_lookup_returns_a_document(window,tmp_path):
 def test_replaced_recording_cannot_restore_cached_lyrics(window,tmp_path):
     source=tmp_path/'changed.mp3';source.write_bytes(b'original')
     track=Track(source,'Changed');doc=LyricsDocument([Cue('Original words',1,2)],3,source_sha256=fingerprint(source))
+    doc=approve_document(doc,fingerprint(source))
     sidecar=source.with_suffix('.lyrics.json');save_lyrics(doc,sidecar);window.lyric_files[str(source)]=str(sidecar)
     window._remember_document(track,doc);assert window._has_lyrics(track)
     source.write_bytes(b'replacement recording')
@@ -91,9 +93,10 @@ def add_fixture_tracks(window,tmp_path,count=2):
     window.all_tracks=tracks;window._apply_queue();return tracks
 
 def lyric_fixture(track,status='pass'):
-    return LyricsDocument([Cue('Fixture lyric passage',1,2)],3,source_sha256=fingerprint(track.path),quality={'status':status})
+    document=LyricsDocument([Cue('Fixture lyric passage',1,2)],3,source_sha256=fingerprint(track.path),quality={'status':status})
+    return approve_document(document,fingerprint(track.path)) if status=='pass' else document
 
-def test_completed_alignment_updates_idle_selected_track_and_keeps_selection(window,tmp_path,lyric_tasks):
+def test_approved_saved_revision_updates_idle_selected_track_and_keeps_selection(window,tmp_path,lyric_tasks):
     tracks=add_fixture_tracks(window,tmp_path);window.playlist.setCurrentRow(1)
     track=tracks[1];doc=lyric_fixture(track);target=tmp_path/'prepared.json';save_lyrics(doc,target)
     window._lyrics_ready(track,target,doc)
@@ -101,7 +104,7 @@ def test_completed_alignment_updates_idle_selected_track_and_keeps_selection(win
     assert window._selected_track()==track
     assert 'LYRICS READY' in window.playlist.currentItem().text()
     assert window.lyric_text.toPlainText()=='Fixture lyric passage'
-    assert window.lyric_status.text().startswith('Lyrics ready')
+    assert 'Lyrics ready' in window.lyric_status.text()
     assert window.engine.tracks==tracks
     # A sidecar search started before completion must not erase the fresh result.
     lyric_tasks[0].done(None)
@@ -115,8 +118,8 @@ def test_saved_review_draft_is_visible_but_stays_out_of_ready_filter(window,tmp_
     window._lyrics_ready(track,target,doc)
     assert 'LYRICS NEED REVIEW' in window.playlist.item(0).text()
     assert 'MUSIC ONLY' not in window.playlist.item(0).text()
-    assert window.lyric_status.text().startswith('Preparation complete · lyrics need review')
-    assert 'A passage resembles a common transcription artifact.' in window.lyric_status.text()
+    assert 'Lyrics need review' in window.lyric_status.text()
+    assert 'A passage resembles a common transcription artifact.' in window.review_notes.toPlainText()
     assert window.lyric_text.toPlainText()=='Fixture lyric passage'
     assert not window._has_lyrics(track) and window.stage._lyrics is None
     window.ready_only.setChecked(True)
@@ -135,7 +138,7 @@ def test_async_sidecar_load_refreshes_label_without_resetting_queue(window,tmp_p
     assert 'LYRICS READY' in window.playlist.item(0).text()
     assert window.engine.current_track==track and window.engine.tracks==tracks
     assert window.engine.order.bag==[1] and window.engine.order.back==[1]
-    assert window.lyric_status.text().startswith('Lyrics ready')
+    assert 'Lyrics ready' in window.lyric_status.text()
 
 @pytest.mark.parametrize('location',['sidecar','cache'])
 def test_idle_selection_discovers_existing_lyrics_and_refreshes_its_row(window,tmp_path,lyric_tasks,location):
@@ -157,7 +160,7 @@ def test_completed_background_result_does_not_replace_another_selected_transcrip
     window._lyrics_ready(tracks[0],target,other)
     assert window._selected_track()==tracks[1]
     assert window.lyric_text.toPlainText()=='Fixture lyric passage'
-    assert 'LYRICS READY' in window.playlist.item(0).text()
+    assert 'LYRICS NEED REVIEW' in window.playlist.item(0).text()  # Text changed after its approval.
 
 def test_failed_async_load_refreshes_stale_row(window,tmp_path,lyric_tasks):
     track=add_fixture_tracks(window,tmp_path,1)[0];doc=lyric_fixture(track)
@@ -209,3 +212,27 @@ def test_passing_result_preserves_playing_queue_and_independent_selection(window
     assert window.engine.tracks==tracks and window.engine.order.bag==[1] and window.engine.order.back==[1]
     assert window._selected_track()==tracks[1] and not audio_resets
     assert window.stage._lyrics is document and 'LYRICS READY' in window.playlist.item(0).text()
+
+
+def test_waveform_color_picker_persists_profile_and_cancel_preserves_choice(window,tmp_path,monkeypatch):
+    from PySide6.QtGui import QColor
+    monkeypatch.setattr('gnb_player.app.QColorDialog.getColor',lambda *args:QColor('#39FF14'))
+    window.wave_color.click()
+    assert window.stage._settings['waveform_color']=='#39ff14'
+    assert '#39FF14' in window.wave_color.text()
+    window.save_session()
+    saved=json.loads((window.data_dir/'session.json').read_text())
+    assert saved['settings']['waveform_color']=='#39ff14'
+    window.set_waveform_color('#0088ff')
+    window.load_profile(window.data_dir/'session.json')
+    assert window.visual_settings()['waveform_color']=='#39ff14'
+    monkeypatch.setattr('gnb_player.app.QColorDialog.getColor',lambda *args:QColor())
+    window.wave_color.click()
+    assert window.visual_settings()['waveform_color']=='#39ff14'
+
+
+def test_legacy_playlist_resets_waveform_color_to_original_gold(window,tmp_path):
+    legacy=tmp_path/'legacy.json';write_profile(legacy,[],[],{},settings={'brand':'Old station'})
+    window.set_waveform_color('#39ff14');window.load_profile(legacy)
+    assert window.visual_settings()['waveform_color']=='#dfbd7f'
+    assert window.stage._settings['waveform_color']=='#dfbd7f'

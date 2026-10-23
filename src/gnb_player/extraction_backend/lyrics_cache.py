@@ -72,7 +72,13 @@ def read_evidence(path,duration):
             previous=a
         path.touch();return words
     except (OSError,ValueError,KeyError,TypeError):return None
-def write_evidence(path,words):
+def read_evidence_metadata(path):
+    if path is None or path.is_symlink() or not path.is_file() or path.stat().st_size>2*1024*1024:return None
+    try:
+        raw=json.loads(path.read_text()).get('recognition')
+        return raw if isinstance(raw,dict) else None
+    except (OSError,ValueError,TypeError):return None
+def write_evidence(path,words,recognition=None):
     if path is None or path.is_symlink():return
-    try:atomic(path,{'words':words});prune(path.parent)
+    try:atomic(path,{'words':words,**({'recognition':recognition} if recognition is not None else {})});prune(path.parent)
     except (OSError,ValueError,TypeError):return

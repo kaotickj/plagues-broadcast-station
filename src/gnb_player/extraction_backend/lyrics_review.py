@@ -2,6 +2,10 @@
 from copy import deepcopy
 from difflib import SequenceMatcher
 import math,re,time,os,bisect
+try:
+    from .lyrics_recognition import recognition_policy, cache_policy, segment_evidence
+except ImportError:
+    from lyrics_recognition import recognition_policy, cache_policy, segment_evidence
 VERSION='automatic-review-3'
 
 def token(text):return re.sub(r'[^\w]','',str(text).casefold())
@@ -21,8 +25,12 @@ def pairing(primary,secondary,drift=4):
     return matches
 
 def suspect_cue(data,index):
+    try:
+        from .lyrics_quality import artifact_suspected
+    except ImportError:
+        from lyrics_quality import artifact_suspected
     cue=data['segments'][index];words=cue.get('words',[])
-    return bool(cue.get('needs_review') or not valid(words)
+    return bool(cue.get('needs_review') or artifact_suspected(data,index) or not valid(words)
         or (index and cue['start']<data['segments'][index-1]['end']-.1)
         or (index+1<len(data['segments']) and cue['end']>data['segments'][index+1]['start']+.1))
 
@@ -125,13 +133,15 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
     data['machine_review']={'version':VERSION,'checked_at':int(time.time()),'recognizers':list(dict.fromkeys([(original.get('pipeline') or {}).get('recognizer','large-v3'),'medium.en']+(['large-v3'] if rechecks else []))),'preserved_human_text':preserve_text,'repairs':repairs[:64],'held_passages':held[:64],'confirmed_gaps':verified_gaps,'notice':'Automated comparison, not a human review. Published corrections are never replaced.'}
     return data
 
-def recognize(audio,sr,windows,engine,progress):
-    from lyrics_acceleration import enabled,recognize_windows
+def recognize(audio,sr,windows,engine,progress,evidence=None):
+    from lyrics_acceleration import enabled,recognize_windows,GpuCapacityDeferred
     if engine=='large-v3' and enabled():
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory(prefix='gnb-review-vulkan-') as folder:
-            try:return recognize_windows(audio,sr,windows,Path(folder),progress)
+            try:return recognize_windows(audio,sr,windows,Path(folder),progress,evidence=evidence,independent=True)
+            except GpuCapacityDeferred:
+                raise
             except Exception as error:print('GPU review fallback:',type(error).__name__,str(error)[:200],flush=True)
     from faster_whisper import WhisperModel
     from lyrics_pipeline import model_path,release_memory
@@ -140,21 +150,31 @@ def recognize(audio,sr,windows,engine,progress):
     # Load the CPU model lazily; a cached full-song evidence pass needs none.
     # The timestamp/probability evidence remains private and source-specific.
     from lyrics_cache import evidence_path,read_evidence,write_evidence
+    import lyrics_cache
+    policy=recognition_policy(engine,independent=True)
+    if evidence is not None:evidence.update(backend='faster-whisper',engine=engine,settings=policy,windows=[])
     model_factory=lambda:WhisperModel(selected_model_path,device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
     result={}
     for n,(key,start,end) in enumerate(windows):
         clip=audio[round(start*sr):round(end*sr)]
-        cache=evidence_path(clip,sr,engine+'-beam3-no-prompt-v3:'+str(start))
+        cache=evidence_path(clip,sr,engine+'-beam3-policy-v4:'+cache_policy(policy)+':'+str(start))
         cached=read_evidence(cache,end)
         if cached is not None:
+            if evidence is not None:
+                reader=getattr(lyrics_cache,'read_evidence_metadata',lambda p:None)
+                evidence['windows'].append({'key':key,'start':start,'end':end,'cached':True,
+                                            'recognition':reader(cache),'words':deepcopy(cached)})
             result[key]=cached;progress('reviewing',(n+1)/len(windows),'Reusing cached independent recognition evidence.');continue
         if model is None:model=model_factory()
-        segments,_=model.transcribe(clip,language='en',word_timestamps=True,condition_on_previous_text=False,beam_size=3,vad_filter=False,initial_prompt=None,no_speech_threshold=.6,temperature=(0,.2))
+        segments,info=model.transcribe(clip,language=None if policy['language']=='auto' else policy['language'],task=policy['task'],word_timestamps=True,condition_on_previous_text=False,beam_size=3,vad_filter=False,initial_prompt=None,no_speech_threshold=.6,temperature=(0,.2))
         words=[]
+        raw={'segments':[],'language':getattr(info,'language',policy['language'])}
         for cue in segments:
+            raw['segments'].append(segment_evidence(cue,offset=start))
             for w in cue.words or []:
                 if w.word.strip():words.append({'text':w.word.strip(),'start':round(start+w.start,3),'end':round(start+w.end,3),'score':float(w.probability)})
-        write_evidence(cache,words)
+        write_evidence(cache,words,raw)
+        if evidence is not None:evidence['windows'].append({'key':key,'start':start,'end':end,'cached':False,'recognition':raw})
         result[key]=words;progress('reviewing',(n+1)/len(windows),f'Checking the vocal with {engine}; no title prompt is used.')
     del model;release_memory();return result
 
@@ -175,7 +195,14 @@ def review(source,work,data,progress,preserve_text=False):
     def activity(a,b):
         part=energy[max(0,int(a*4)):min(len(energy),max(1,int(b*4)))]
         return float(np.mean(part>reference*.12)) if len(part) else 0
-    secondary=recognize(audio,sr,[('full',0,duration)],'medium.en',progress)['full']
+    primary=(data.get('recognition_evidence') or {}).get('primary') or {}
+    language=primary.get('language',os.environ.get('GNB_LYRICS_LANGUAGE','en'))
+    if language not in {'en','English','english'}:
+        data.setdefault('warnings',[]).append('English-only independent review was skipped for this detected language; review the saved words manually.')
+        return data
+    review_evidence={'secondary':{},'rechecks':{}}
+    data.setdefault('recognition_evidence',{})['independent_review']=review_evidence
+    secondary=recognize(audio,sr,[('full',0,duration)],'medium.en',progress,evidence=review_evidence['secondary'])['full']
     matches=pairing(flatten(data),secondary);windows=[];cursor=0
     for i,cue in enumerate(data['segments']):
         words=cue.get('words',[]);indices=range(cursor,cursor+len(words));cursor+=len(words)
@@ -193,7 +220,8 @@ def review(source,work,data,progress,preserve_text=False):
     confirmations=[('confirm-gap-'+str(round(start,3)),start,end) for start,end in gaps(data)
         if not within(secondary,start+1,end-1) and activity(start+1,end-1)>=.2]
     check_windows=windows[:24]+gap_windows[:8]+confirmations[:8]
-    rechecks=recognize(audio,sr,check_windows,'large-v3',progress) if check_windows else {}
+    rechecks=recognize(audio,sr,check_windows,'large-v3',progress,evidence=review_evidence['rechecks']) if check_windows else {}
     reviewed=reconcile(data,secondary,rechecks,activity,preserve_text)
+    reviewed.setdefault('recognition_evidence',{})['independent_review']=review_evidence
     reviewed.setdefault('pipeline',{})['reviewer']=VERSION
     return reviewed

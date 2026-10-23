@@ -26,7 +26,7 @@ class PackagingTests(unittest.TestCase):
     def test_external_worker_sources_are_data_files_without_model_weights(self):
         spec=self.read_spec();data=spec['datas']
         names={Path(source).name for source,destination in data}
-        for name in ['extract_worker.py','extraction.py','model_install.py','model_install_worker.py','model_discovery.py',
+        for name in ['extract_worker.py','extraction.py','lyrics.py','model_install.py','model_install_worker.py','model_discovery.py',
                      'lyrics_pipeline.py','lyrics_acceleration.py','lyrics_gpu_helper.py','lyrics_review.py','lyrics_quality.py']:
             self.assertIn(name,names)
         self.assertTrue(all(Path(source).exists() for source,destination in data))

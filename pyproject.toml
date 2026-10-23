@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plagues-broadcast-station"
-version = "0.2.0"
+version = "0.2.4rc1"
 description = "A music, artwork and synchronized lyric broadcast station for Windows and Linux"
 requires-python = ">=3.11"
-dependencies = ["PySide6>=6.8,<7", "numpy>=1.26,<3"]
+dependencies = ["PySide6>=6.8,<7", "numpy>=1.26,<3", "keyring>=25.7,<26"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]

@@ -18,6 +18,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extraction import ExtractionConfig, config_status, media_environment, effective_model_paths, required_model_files
+from lyrics import lyric_write_lock
 
 OUTPUT = sys.stdout
 OWN_PROCESS_GROUP = False
@@ -101,12 +102,18 @@ def prepare_environment(config: ExtractionConfig) -> None:
         "GNB_LYRICS_SEPARATOR_MODEL": str(models["separator"]),
         "GNB_LYRICS_ALIGNMENT_MODEL": str(models["alignment"]),
         "GNB_LYRICS_TRANSCRIPTION_ENGINE": config.engine,
+        "GNB_LYRICS_LANGUAGE": config.recognition_language,
+        "GNB_LYRICS_TASK": config.recognition_task,
+        "GNB_LYRICS_PROMPT": config.recognition_prompt,
         "GNB_LYRICS_GPU_PYTHON": config.gpu_python_path,
         "GNB_LYRICS_VULKAN_BINARY": config.vulkan_binary,
         "GNB_LYRICS_VULKAN_MODEL": config.vulkan_model,
         "GNB_LYRICS_GPU_LOCK": config.gpu_lock,
         "GNB_LYRICS_MEDIA_LIBRARY_PATH": config.media_library_path,
         "GNB_LYRICS_GPU": "1" if config.use_gpu else "0",
+        "GNB_LYRICS_PHASE_GPU": "1",
+        "GNB_LYRICS_GPU_WAIT": "1" if config.wait_for_gpu else "0",
+        "GNB_LYRICS_GPU_WAIT_SECONDS": str(config.gpu_wait_seconds),
         "GNB_LYRICS_ROCM_SEPARATION": "0",
         "GNB_LYRICS_CPU_THREADS": str(config.cpu_threads),
         "OMP_NUM_THREADS": str(config.cpu_threads),
@@ -137,6 +144,14 @@ def require_runtime(config: ExtractionConfig, reference: str) -> None:
 
 
 def atomic_result(target: Path, data: dict) -> None:
+    with lyric_write_lock(target):
+        _atomic_result_unlocked(target, data)
+
+
+def _atomic_result_unlocked(target: Path, data: dict) -> None:
+    data = dict(data)
+    # Model output can never inherit an earlier explicit human approval.
+    data.pop("human_review", None)
     if target.is_symlink():
         raise ValueError("Save lyrics to a regular JSON file rather than a symbolic link.")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +163,8 @@ def atomic_result(target: Path, data: dict) -> None:
             os.fsync(handle.fileno())
         if target.exists():
             history = target.parent / "history"
+            if history.is_symlink():
+                raise ValueError("Refusing a symbolic-link lyric history directory.")
             history.mkdir(exist_ok=True, mode=0o700)
             backup = history / (target.stem + "-" + str(time.time_ns()) + ".json")
             shutil.copy2(target, backup)
@@ -167,39 +184,33 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
     require_runtime(config, reference)
     prepare_environment(config)
     sys.path.insert(0, str(Path(__file__).resolve().with_name("extraction_backend")))
-    from lyrics_acceleration import reservation
+    from lyrics_acceleration import reset_gpu_timings, gpu_timings
     from lyrics_pipeline import extract
     from lyrics_review import review
     from lyrics_quality import assess
-    began = time.monotonic()
-    while True:
-        with reservation() as state:
-            busy = config.use_gpu and state.get("available") and state.get("busy")
-            if busy and config.wait_for_gpu and time.monotonic() - began < config.gpu_wait_seconds:
-                progress("waiting", 0, state.get("message", "Waiting for GPU capacity; audio playback continues."))
-            else:
-                if busy:
-                    os.environ["GNB_LYRICS_GPU_BLOCKED"] = "1"
-                    progress("preparing", 0, "GPU is busy; using the CPU without interrupting playback or other applications.")
-                with tempfile.TemporaryDirectory(prefix="gnb-player-lyrics-") as folder:
-                    work = Path(folder)
-                    data = extract(source, work, config.engine, config.separate_vocals, reference, progress, title=source.stem)
-                    if config.auto_review and assess(data)["status"] != "pass":
-                        try:
-                            data = review(source, work, data, progress, preserve_text=bool(reference))
-                        except Exception as error:
-                            data.setdefault("warnings", []).append("Independent model review could not complete; check these lyrics before broadcasting.")
-                            print("Independent review failed:", type(error).__name__, str(error)[:300], file=sys.stderr, flush=True)
-                if source.stat().st_size != before_size or source.stat().st_mtime_ns != before_mtime or source_fingerprint(source) != fingerprint:
-                    raise ValueError("The recording changed during extraction. Existing lyrics were kept; retry once the copy or edit finishes.")
-                if abs(float(data.get("duration", 0)) - duration) > 2:
-                    raise ValueError("Extracted audio duration did not match the recording. Existing lyrics were kept.")
-                data.update(title=source.stem, source_sha256=fingerprint, source_size=before_size,
-                            source_mtime=before_mtime / 1e9, created_at=int(time.time()), reviewed=False)
-                data["quality"] = assess(data)
-                atomic_result(output, data)
-                return data
-        time.sleep(2)
+    from lyrics_recognition import transcript_snapshot
+    reset_gpu_timings()
+    with tempfile.TemporaryDirectory(prefix="gnb-player-lyrics-") as folder:
+        work = Path(folder)
+        data = extract(source, work, config.engine, config.separate_vocals, reference, progress, title=source.stem)
+        data.setdefault('recognition_evidence',{})['before_review']=transcript_snapshot(data)
+        if config.auto_review and assess(data)["status"] != "pass":
+            try:
+                data = review(source, work, data, progress, preserve_text=bool(reference))
+            except Exception as error:
+                data.setdefault("warnings", []).append("Independent model review could not complete; check these lyrics before broadcasting.")
+                print("Independent review failed:", type(error).__name__, str(error)[:300], file=sys.stderr, flush=True)
+        data.setdefault('recognition_evidence',{})['after_review']=transcript_snapshot(data)
+    if source.stat().st_size != before_size or source.stat().st_mtime_ns != before_mtime or source_fingerprint(source) != fingerprint:
+        raise ValueError("The recording changed during extraction. Existing lyrics were kept; retry once the copy or edit finishes.")
+    if abs(float(data.get("duration", 0)) - duration) > 2:
+        raise ValueError("Extracted audio duration did not match the recording. Existing lyrics were kept.")
+    data.update(title=source.stem, source_sha256=fingerprint, source_size=before_size,
+                source_mtime=before_mtime / 1e9, created_at=int(time.time()), reviewed=False)
+    data.setdefault("pipeline",{})["gpu_schedule"]={"policy":"phase-scoped-exclusive","phases":gpu_timings()}
+    data["quality"] = assess(data)
+    atomic_result(output, data)
+    return data
 
 
 def main(argv: list[str] | None = None) -> int:
