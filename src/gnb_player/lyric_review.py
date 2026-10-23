@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 
-from .lyrics import Cue, LyricsDocument, MAX_LYRIC_BYTES, fingerprint, lyric_write_lock, _review_state_digest
+from .lyrics import Cue, LyricsDocument, MAX_LYRIC_BYTES, fingerprint, lyric_write_lock, _review_state_digest, preserve_import_provenance
 
 
 def document_revision(document: LyricsDocument) -> str:
@@ -83,7 +83,16 @@ def is_approved(document: LyricsDocument, source_sha256: str | None = None) -> b
         return False
 
 
+def _demote_legacy_publication(document):
+    if 'reviewed' in document.metadata or 'publication' in document.metadata:
+        preserve_import_provenance(document)
+        if 'reviewed' in document.metadata:
+            document.metadata['reviewed'] = False
+        document.metadata.pop('publication', None)
+
+
 def _hold_quality(document):
+    _demote_legacy_publication(document)
     if "review_original_quality" not in document.metadata:
         document.metadata["review_original_quality"] = deepcopy(document.quality)
     quality = deepcopy(document.quality)
@@ -102,6 +111,7 @@ def _alignment(document):
 def invalidate_review(document: LyricsDocument, reason: str = "Lyrics changed; review this revision before airing.") -> LyricsDocument:
     result = deepcopy(document)
     result._review_base_state = getattr(document, "_review_base_state", _review_state_digest(document))
+    _demote_legacy_publication(result)
     alignment = _alignment(result)
     result.human_review = {"status": "draft", "reason": str(reason)}
     if isinstance(alignment, list) and alignment:

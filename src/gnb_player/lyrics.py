@@ -15,6 +15,8 @@ import re
 import tempfile
 
 MAX_LYRIC_BYTES = 8 * 1024 * 1024
+MAX_IMPORT_PROVENANCE_BYTES = 256 * 1024
+IMPORT_PROVENANCE_SCHEMA = 'broadcast-import-provenance-1'
 
 
 @dataclass(frozen=True)
@@ -196,17 +198,106 @@ def parse_subtitles(text: str, duration: float = 0, title: str = "") -> LyricsDo
     return LyricsDocument(cues, duration or (cues[-1].end if cues else 0), title)
 
 
-def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
-    file = Path(path)
-    if not file.is_file() or file.stat().st_size > MAX_LYRIC_BYTES:
+def _read_lyric_bytes(file: Path) -> bytes:
+    if not file.is_file():
         raise ValueError("Choose a lyric JSON, LRC, SRT or VTT file smaller than 8 MB.")
-    text = file.read_text(encoding="utf-8-sig")
+    with file.open('rb') as handle:
+        payload = handle.read(MAX_LYRIC_BYTES + 1)
+    if len(payload) > MAX_LYRIC_BYTES:
+        raise ValueError("Choose a lyric JSON, LRC, SRT or VTT file smaller than 8 MB.")
+    return payload
+
+
+def _parse_lyric_bytes(file: Path, payload: bytes, duration: float) -> LyricsDocument:
+    text = payload.decode('utf-8-sig')
     suffix = file.suffix.lower()
     if suffix == ".lrc":
         return parse_lrc(text, duration, file.stem)
     if suffix in {".srt", ".vtt"}:
         return parse_subtitles(text, duration, file.stem)
     return LyricsDocument.from_dict(json.loads(text), duration)
+
+
+def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
+    file = Path(path)
+    return _parse_lyric_bytes(file, _read_lyric_bytes(file), duration)
+
+
+def _json_bytes(data) -> bytes:
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+
+
+def preserve_import_provenance(document: LyricsDocument, original: dict | None = None,
+                               *, payload: bytes | None = None, source_format='json',
+                               source_name='', kind='legacy-provenance-before-local-review') -> None:
+    """Preserve inert origin claims once; never convert imported claims to approval.
+
+    Metadata values stay in the normal document unchanged except for effective
+    publication flags handled by the review layer. The bounded snapshot keeps
+    important origin fields first; oversized/excess fields have explicit hashes
+    and remain available in the ordinary preserved metadata. No nested snapshots
+    are created on a subsequent import/export cycle.
+    """
+    existing = document.metadata.get('import_provenance')
+    if (isinstance(existing, dict) and existing.get('schema') == IMPORT_PROVENANCE_SCHEMA
+            and existing.get('claims_are_unverified') is True
+            and re.fullmatch(r'[a-f0-9]{64}', str(existing.get('payload_sha256', '')))
+            and len(_json_bytes(existing)) <= MAX_IMPORT_PROVENANCE_BYTES):
+        return
+    original = deepcopy(original if original is not None else document.to_dict())
+    metadata = {key: value for key, value in original.items() if key != 'segments'}
+    preferred = ['song_id', 'recording_id', 'origin_id', 'source_sha256', 'source_size',
+                 'source_mtime', 'source', 'origin', 'provenance', 'publication',
+                 'reviewed', 'human_review', 'machine_review', 'quality', 'title', 'duration', 'version']
+    keys = [key for key in preferred if key in metadata] + [key for key in metadata if key not in preferred]
+    fields, omitted, used = {}, [], 0
+    omitted_count = 0
+    for index, key in enumerate(keys):
+        encoded = _json_bytes({key: metadata[key]})
+        if index < 256 and len(encoded) <= 64 * 1024 and used + len(encoded) <= 192 * 1024:
+            fields[key] = deepcopy(metadata[key]); used += len(encoded)
+        else:
+            omitted_count += 1
+            if len(omitted) < 128:
+                omitted.append({'field': str(key)[:256], 'sha256': sha256(encoded).hexdigest(), 'bytes': len(encoded)})
+    snapshot = {'schema': IMPORT_PROVENANCE_SCHEMA, 'kind': kind,
+                'claims_are_unverified': True, 'source_format': str(source_format)[:16],
+                'source_name': str(source_name)[:256],
+                'payload_sha256': sha256(payload if payload is not None else _json_bytes(original)).hexdigest(),
+                'original_metadata_sha256': sha256(_json_bytes(metadata)).hexdigest(),
+                'original_fields': fields, 'omitted_fields': omitted, 'omitted_field_count': omitted_count}
+    if len(_json_bytes(snapshot)) > MAX_IMPORT_PROVENANCE_BYTES:
+        raise ValueError('The imported provenance snapshot exceeds the supported size.')
+    document.metadata['import_provenance'] = snapshot
+
+
+def load_imported_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
+    """Explicit operator import: capture origin before any local audio/title binding."""
+    file = Path(path)
+    payload = _read_lyric_bytes(file)
+    document = _parse_lyric_bytes(file, payload, duration)
+    original = json.loads(payload.decode('utf-8-sig')) if file.suffix.lower() not in {'.lrc', '.srt', '.vtt'} else document.to_dict()
+    preserve_import_provenance(document, original, payload=payload,
+                               source_format=file.suffix.lower().lstrip('.') or 'json',
+                               source_name=file.name, kind='explicit-file-import')
+    if len(json.dumps(document.to_dict(), ensure_ascii=False, allow_nan=False, indent=2).encode('utf-8')) > MAX_LYRIC_BYTES:
+        raise ValueError('The imported lyrics and provenance exceed the supported 8 MB saved-file size.')
+    return document
+
+
+def lyric_target_bytes(target: str | Path) -> bytes | None:
+    """Bounded raw target snapshot for compare-and-swap writers; None means absent."""
+    target = Path(target)
+    if target.is_symlink():
+        raise ValueError('Save lyrics to a regular JSON file, not a symbolic link.')
+    if not target.exists():
+        return None
+    return _read_lyric_bytes(target)
+
+
+def lyric_target_revision(target: str | Path) -> str | None:
+    payload = lyric_target_bytes(target)
+    return sha256(payload).hexdigest() if payload is not None else None
 
 
 @contextmanager
@@ -252,6 +343,8 @@ def _save_lyrics_unlocked(document: LyricsDocument, target: Path) -> None:
     if target.is_symlink():
         raise ValueError("Choose a regular lyric file, not a symbolic link.")
     payload = json.dumps(document.to_dict(), ensure_ascii=False, allow_nan=False, indent=2)
+    if len(payload.encode('utf-8')) > MAX_LYRIC_BYTES:
+        raise ValueError('The lyric file exceeds the supported 8 MB saved-file size.')
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".lyrics-", suffix=".json", dir=target.parent)
     try:

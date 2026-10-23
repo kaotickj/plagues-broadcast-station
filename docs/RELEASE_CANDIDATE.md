@@ -5,6 +5,15 @@ change (`24cc6bf`, locally replayed as `42d140b`), and preserved phase-scoped GP
 patches. Original checkouts, their uncommitted work, installed binaries, launchers,
 lyrics and media remain outside this candidate and are not modified by the work.
 
+## 0.2.4rc2 Save follow-up
+
+Save lyrics updates the selected recording without a path dialog; Export lyrics…
+creates a separate copy. Imports retain an original provenance snapshot, edited
+drafts cannot inherit old publication approval, and extraction refuses to replace
+a target changed during processing. See [storage and Save](LYRICS_STORAGE_AND_SAVE.md).
+New local package/test receipts identify the exact follow-up commit; historical
+0.2.4rc1 results below do not establish this follow-up by themselves.
+
 ## Required acceptance
 
 - Editable recording-bound lyrics with a visible save action and active-cell
@@ -48,7 +57,7 @@ backups available; executable rollback must not revert lyric or media data.
 
 ## Source verification
 
-The combined source passed 312 tests and 36 subtests on the local Linux host.
+The earlier 0.2.4rc1 combined source passed 312 tests and 36 subtests on the local Linux host.
 Independent native Qt acceptance passed 36 workflow checks with disposable data.
 A muted synthetic playback/local-recording check produced valid H.264/AAC output.
 The first full run's isolated GPU-mock environment failure was corrected without

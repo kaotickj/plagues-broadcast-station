@@ -86,7 +86,7 @@ def test_export_requires_saved_changes_and_writes_separate_copy(window,tmp_path,
     type_into_first_line(window,'Export this saved correction')
     window._export_saved_lyrics()
     assert not export.exists()
-    assert 'Save changes before exporting' in window.lyric_save_status.text()
+    assert 'Save lyrics before exporting' in window.lyric_save_status.text()
     window._save_lyric_changes();pending[-1].finish()
     original=target.read_bytes()
     QTest.mouseClick(window.export_lyrics_button,Qt.MouseButton.LeftButton)

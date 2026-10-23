@@ -1,6 +1,6 @@
 # Linux installer and upgrade
 
-The local 0.2.4rc1 candidate uses the same managed installer and rollback format.
+The local 0.2.4rc2 candidate uses the same managed installer and rollback format.
 See [candidate acceptance](docs/RELEASE_CANDIDATE.md) for scope and verification
 limits. Preparing this package does not upgrade an existing installation.
 
@@ -15,10 +15,10 @@ Version 0.2.2 adds explicit human lyric review bound to both the recording finge
 ```sh
 # Verify the checksum next to the package (integrity, not publisher authentication).
 cd /path/to/downloads
-sha256sum -c PlaguesBroadcastStation-0.2.3-linux-x86_64.run.sha256
+sha256sum -c PlaguesBroadcastStation-0.2.4rc2-linux-x86_64.run.sha256
 
 # FIRST INSTALL: replace the example data path with the exact existing --data-dir.
-sh PlaguesBroadcastStation-0.2.3-linux-x86_64.run \
+sh PlaguesBroadcastStation-0.2.4rc2-linux-x86_64.run \
   --install-dir "$HOME/.local/opt/plagues-broadcast-station" \
   --data-dir "/path/to/existing broadcast data" \
   --desktop-entry
@@ -48,7 +48,7 @@ All paths may contain spaces. The install location defaults to `~/.local/opt/pla
 If the standard menu entry already launches the portable app, explicitly adopt it instead of creating a confusing duplicate:
 
 ```sh
-sh PlaguesBroadcastStation-0.2.3-linux-x86_64.run \
+sh PlaguesBroadcastStation-0.2.4rc2-linux-x86_64.run \
   --install-dir "$HOME/.local/opt/plagues-broadcast-station" \
   --data-dir "/the same data directory used by the portable launcher" \
   --adopt-desktop-entry
@@ -94,7 +94,7 @@ Built and tested on **Debian 13.7 x86_64, glibc 2.41**, with Python 3.13.5 / PyI
 Artifacts in `artifacts/`, with adjacent checksum files (integrity, not publisher authenticity):
 
 ```text
-PlaguesBroadcastStation-0.2.3-linux-x86_64.run  (189485387 bytes)
+PlaguesBroadcastStation-0.2.4rc2-linux-x86_64.run  (189485387 bytes)
 3693fa4effcf7c35ac1aea819fcd339c0b8f37889b33480c7409fab2dbd3f077
 
 PlaguesBroadcastStation-0.2.3-linux-x86_64-portable.tar.gz  (189461610 bytes)

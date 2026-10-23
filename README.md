@@ -1,6 +1,6 @@
 # Plague's Broadcast Station
 
-Local release candidate **0.2.4rc1** combines the recording-bound review workflow,
+Local release candidate **0.2.4rc2** combines the recording-bound review workflow,
 waveform colors and phase-scoped GPU scheduling. See
 [candidate acceptance and installation boundaries](docs/RELEASE_CANDIDATE.md).
 
@@ -44,13 +44,14 @@ Ollama models use a different format and role: an Ollama model tag is a text-mod
 
 Supported imports are segment/word JSON, LRC, SRT and WebVTT. JSON may contain measured word times for karaoke highlighting. Ordinary LRC/subtitle files remain line-timed; the app does not invent word timing from the text.
 
-The **Lyrics** tab shows saved review notes and an editable timed transcript. Correct a line, choose **Save draft**, then check the saved lyrics against the recording and choose **Approve for airing**. Automatic preparation never supplies human approval; only the approved recording and revision become **Lyrics Ready**. [The review and save guide](docs/lyrics-review.md) explains timing edits, recoverable history, and approval invalidation.
+The **Lyrics** tab shows saved review notes and an editable timed transcript. Correct a line, choose **Save lyrics**, then check the saved lyrics against the recording and choose **Approve for airing**. Automatic preparation never supplies human approval; only the approved recording and revision become **Lyrics Ready**. [The review and save guide](docs/lyrics-review.md) explains timing edits, recoverable history, and approval invalidation.
 
-Double-click a lyric cell or press F2 to edit. Save draft and Ctrl+S commit the
+Double-click a lyric cell or press F2 to edit. Save lyrics and Ctrl+S commit the
 current typed cell, then save the recording link before reporting success. Use
-**Expand editor** or drag the workspace dividers for more room. **Save lyrics
-as…** exports a separate copy of the saved revision; save pending edits first.
+**Expand editor** or drag the workspace dividers for more room. **Export lyrics…** exports a separate copy of the saved revision; save pending edits first.
 The operator window title includes the version so a stale shortcut is visible.
+Choose **Help** (F1) for running version/build details, basic usage, storage paths
+and troubleshooting; closing Help leaves the Operator Desk open.
 
 Recognition stays in transcription mode, with English as the default and no
 filename-derived prompt. Advanced recognition language and optional context are
@@ -107,3 +108,5 @@ No public broadcast is used by the tests. Source media is read-only during playb
 Third-party license texts, native-build version information and notices are included with the package. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including corresponding-source requirements when redistributing GPL-configured FFmpeg builds.
 
 Broadcast destinations and masked stream keys can be remembered with explicit **Save/update** in the Broadcast tab. The complete target is stored only in native protected credentials, scoped to the same OS user and data folder; no plaintext fallback or automatic streaming. See [saved livestream profiles](docs/BROADCAST_PROFILE.md) for restore, Forget and backend requirements.
+
+See [Save lyrics and recording identity](docs/LYRICS_STORAGE_AND_SAVE.md) for automatic storage, import provenance, conflict protection and the separate website workflow.

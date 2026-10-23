@@ -13,7 +13,7 @@ the separate Program Output keeps its normal size.
 2. Double-click a line's text, start or end cell, or select it and press **F2**.
    **Tab** moves between cells. Times accept seconds or `m:ss`. Use **Add line**
    or **Remove line** for omissions or recognition artifacts.
-3. Choose **Save draft / Save changes**, or press **Ctrl+S**. Wait for **Saved**.
+3. Choose **Save lyrics / Save lyrics**, or press **Ctrl+S**. Wait for **Saved**.
    **Not saved** means the prior file remains and your edits are still in the
    editor. Changing recordings keeps unsaved buffers separate; closing with
    unsaved changes offers Save, Discard or Cancel. Saved drafts restore from

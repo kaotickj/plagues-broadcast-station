@@ -17,7 +17,7 @@ from . import __version__
 from .library import Track, scan_media, MEDIA_EXTENSIONS
 from .playback import PlaybackEngine
 from .stage import BroadcastStage, IMAGE_SUFFIXES, VIDEO_SUFFIXES, DEFAULT_WAVEFORM_COLOR, waveform_color
-from .lyrics import load_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path
+from .lyrics import load_lyrics, load_imported_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path
 from .file_state import file_change_stamp
 from .lyric_review import document_revision, is_approved, edit_document, retarget_review, save_review_document
 from .lyric_editor import TimedLyricsEditor, stored_review_notes, parse_seconds
@@ -139,6 +139,10 @@ class MainWindow(QMainWindow):
         root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(22,18,22,14); layout.setSpacing(14)
         heading = QHBoxLayout(); title = QLabel("PLAGUE’S BROADCAST STATION"); title.setObjectName('masthead')
         heading.addWidget(title); heading.addStretch()
+        self.help_button=self._button('Help',self._show_help)
+        self.help_button.setObjectName('help_button'); self.help_button.setAccessibleName('Help and app details')
+        self.help_button.setToolTip('App version, storage, basic usage and troubleshooting (F1).')
+        self.help_button.setShortcut(QKeySequence('F1')); heading.addWidget(self.help_button)
         heading.addWidget(self._button('Show Program Output',self.show_output,True)); layout.addLayout(heading)
         intro = QLabel('Music, moving pictures, and words worth staying for.'); intro.setObjectName('muted'); layout.addWidget(intro)
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -171,6 +175,12 @@ class MainWindow(QMainWindow):
         self._appearance_tab(); self._lyrics_tab(); self._broadcast_tab(); self._models_tab()
         self.tabs.currentChanged.connect(self._operator_tab_changed)
         split.addWidget(right); split.setSizes([410,900]); layout.addWidget(split,1); self.setCentralWidget(root)
+
+    def _show_help(self,checked=False):
+        from .help_dialog import HelpDialog
+        if getattr(self,'_help_dialog',None) is None:
+            self._help_dialog=HelpDialog(self,data_dir=self.data_dir)
+        self._help_dialog.show(); self._help_dialog.raise_(); self._help_dialog.activateWindow()
 
     def _appearance_tab(self):
         page=QWidget(); v=QVBoxLayout(page); form=QFormLayout()
@@ -216,10 +226,10 @@ class MainWindow(QMainWindow):
         scroll.setWidget(body); v.addWidget(scroll,1)
         self.lyric_save_status=QLabel('Edits are saved per recording. Automatic preparation does not approve lyrics.'); self.lyric_save_status.setWordWrap(True); self.lyric_save_status.setAccessibleName('Lyric save and review status'); self.lyric_save_status.setTextFormat(Qt.TextFormat.PlainText); v.addWidget(self.lyric_save_status)
         self.review_confirm=QCheckBox('I checked these lyrics against this recording.'); self.review_confirm.setAccessibleName('Confirm human review of this recording and saved lyric revision'); self.review_confirm.toggled.connect(self._update_review_controls); v.addWidget(self.review_confirm)
-        actions=QGridLayout(); self.save_lyrics_button=self._button('Save draft',self._save_lyric_changes,True); self.save_lyrics_button.setToolTip('Save text and line times for this recording (Ctrl+S). Does not approve airing.'); actions.addWidget(self.save_lyrics_button,0,0)
+        actions=QGridLayout(); self.save_lyrics_button=self._button('Save lyrics',self._save_lyric_changes,True); self.save_lyrics_button.setToolTip('Save a draft for the selected recording automatically (Ctrl+S). No filename is needed. Does not approve airing or publish to a website.'); actions.addWidget(self.save_lyrics_button,0,0)
         self.approve_lyrics_button=self._button('Approve for airing',lambda:self._save_lyric_changes(approve=True)); actions.addWidget(self.approve_lyrics_button,0,1)
         self.reload_lyrics_button=self._button('Reload saved',self._discard_lyric_edits); actions.addWidget(self.reload_lyrics_button,1,0)
-        self.export_lyrics_button=self._button('Save lyrics as…',self._export_saved_lyrics); self.export_lyrics_button.setToolTip('Export a separate JSON copy of the saved lyrics. Save pending changes first.'); actions.addWidget(self.export_lyrics_button,1,1); v.addLayout(actions)
+        self.export_lyrics_button=self._button('Export lyrics…',self._export_saved_lyrics); self.export_lyrics_button.setToolTip('Export a separate JSON copy of the saved lyrics. Save pending changes first.'); actions.addWidget(self.export_lyrics_button,1,1); v.addLayout(actions)
         self.lyric_save_shortcut=QShortcut(QKeySequence.StandardKey.Save,page); self.lyric_save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); self.lyric_save_shortcut.activated.connect(self._save_lyric_changes)
         self._update_review_controls()
         self.tabs.addTab(page,'Lyrics')
@@ -421,7 +431,7 @@ class MainWindow(QMainWindow):
             if buffer:
                 if buffer['revision']!=self._editor_revision:buffer['conflict']=True
                 self.lyric_text.set_rows(buffer['rows'])
-                self.lyric_save_status.setText('Unsaved changes. '+('The saved revision changed; reload it before editing again.' if buffer.get('conflict') else 'Save draft to keep these changes for this recording.'))
+                self.lyric_save_status.setText('Unsaved changes. '+('The saved revision changed; reload it before editing again.' if buffer.get('conflict') else 'Save lyrics to keep these changes for this recording.'))
             else:
                 self.lyric_text.set_document(document)
                 self.lyric_save_status.setText('Saved · '+('Reviewed and approved for this exact revision.' if ready else 'Draft saved on this device. Review notes and lyrics, then approve.'))
@@ -486,7 +496,7 @@ class MainWindow(QMainWindow):
         self.remove_line_button.setEnabled(available and not busy)
         self.line_timing_button.setEnabled(available and not busy)
         self.save_lyrics_button.setEnabled(bool(buffer and not buffer.get('conflict') and not busy))
-        self.save_lyrics_button.setText('Save changes' if buffer else 'Save draft')
+        self.save_lyrics_button.setText('Save lyrics')
         self.reload_lyrics_button.setEnabled(bool(track and not busy))
         self.export_lyrics_button.setEnabled(bool(document and not busy))
         self.review_confirm.setEnabled(available and not buffer and not busy and not self._document_ready(track,document))
@@ -520,7 +530,7 @@ class MainWindow(QMainWindow):
         # In-flight searches started before typing cannot replace this buffer.
         self._lyric_requests[key]=self._lyric_requests.get(key,0)+1
         self.review_confirm.setChecked(False)
-        self.lyric_save_status.setText('Unsaved changes · Save draft to keep them. Changed lines keep line timing; old word highlights are cleared on save.')
+        self.lyric_save_status.setText('Unsaved changes · Save lyrics to keep them. Changed lines keep line timing; old word highlights are cleared on save.')
         self.lyric_status.setText(track.title+' · Unsaved changes · lyrics need review.')
         self._update_program_lyrics(track,document)
         self._refresh_lyric_label(track)
@@ -542,7 +552,7 @@ class MainWindow(QMainWindow):
             start,end,text=buffer['rows'][index]
             try:clear.add((parse_seconds(start),parse_seconds(end),text))
             except ValueError:continue
-        self.lyric_save_status.setText('Unsaved changes · Selected lines will use line timing. Save draft to keep this change.')
+        self.lyric_save_status.setText('Unsaved changes · Selected lines will use line timing. Save lyrics to keep this change.')
 
     def _discard_lyric_edits(self):
         track=self._editor_track
@@ -563,7 +573,7 @@ class MainWindow(QMainWindow):
         if not track or not document:return
         key=str(track.path)
         if approve and (not self.review_confirm.isChecked() or key in self._lyric_buffers):
-            self.lyric_save_status.setText('Save your draft, then check the saved lyrics against this recording before approving.')
+            self.lyric_save_status.setText('Save lyrics, then check the saved lyrics against this recording before approving.')
             return
         buffer=self._lyric_buffers.get(key)
         if not buffer:
@@ -588,7 +598,7 @@ class MainWindow(QMainWindow):
                 if not self.save_session():raise OSError('Session save did not complete.')
             except (OSError,ValueError,TypeError) as error:
                 self._close_after_lyric_save=False
-                self.lyric_save_status.setText('Lyrics are saved; session save did not complete · '+str(error)+' Retry Save changes.');return False
+                self.lyric_save_status.setText('Lyrics are saved; session save did not complete · '+str(error)+' Retry Save lyrics.');return False
             self._lyric_buffers.pop(key,None)
             self._lyrics_ready(track,Path(buffer['location']),current)
             self._update_review_controls()
@@ -647,7 +657,7 @@ class MainWindow(QMainWindow):
                     'rows':[(str(c.start),str(c.end),c.text) for c in saved.segments],
                     'conflict':False,'session_only':True}
                 if self._editor_track and self._editor_track.path==track.path:
-                    self.lyric_save_status.setText('Lyrics are saved; session save did not complete. Your lyrics are kept at '+str(target)+'. Retry Save changes before closing.')
+                    self.lyric_save_status.setText('Lyrics are saved; session save did not complete. Your lyrics are kept at '+str(target)+'. Retry Save lyrics before closing.')
                 self._update_program_lyrics(track,saved);self._refresh_lyric_label(track);self._update_review_controls();return
             if self._editor_track and self._editor_track.path==track.path:
                 self.lyric_save_status.setText('Saved · '+('Reviewed and approved for this recording and revision.' if is_approved(saved) else 'Draft saved. Check the lyrics, then approve for airing.'))
@@ -666,7 +676,7 @@ class MainWindow(QMainWindow):
         if not track or not document:return
         key=str(track.path)
         if key in self._lyric_buffers or key in self._saving_lyrics:
-            self.lyric_save_status.setText('Save changes before exporting a separate copy of these lyrics.');return
+            self.lyric_save_status.setText('Save lyrics before exporting a separate copy of these lyrics.');return
         try:
             current=self._find_document(track)
             if current is None or document_revision(current)!=self._editor_revision:
@@ -677,7 +687,7 @@ class MainWindow(QMainWindow):
             if target.suffix.lower()!='.json':target=target.with_name(target.name+'.json')
             if target.resolve()==track.path.resolve():raise ValueError('Save lyrics separately from the recording.')
             location=self.lyric_files.get(key) or self._lyric_locations.get(key)
-            if location and target.resolve()==Path(location).resolve():raise ValueError('Choose a separate file for export; Save changes updates the current lyric file.')
+            if location and target.resolve()==Path(location).resolve():raise ValueError('Choose a separate file for export; Save lyrics updates the current lyric file.')
             save_lyrics(current,target)
             self.lyric_save_status.setText('Exported saved lyrics · '+str(target))
         except (OSError,ValueError,TypeError) as error:
@@ -814,7 +824,7 @@ class MainWindow(QMainWindow):
         if not name:return
         self._saving_lyrics.add(key); self._update_review_controls()
         def work():
-            document=load_lyrics(name); identity=fingerprint(track.path)
+            document=load_imported_lyrics(name); identity=fingerprint(track.path)
             if document.source_sha256 and document.source_sha256!=identity:raise ValueError('This lyric file belongs to a different recording. Import the matching recording, or align the exact words to this one.')
             document.source_sha256=identity; document.title=track.title
             target=cached_lyrics_path(track.path,Path(self.extract_config.cache_dir))

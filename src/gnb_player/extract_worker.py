@@ -15,14 +15,16 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extraction import ExtractionConfig, config_status, media_environment, effective_model_paths, required_model_files
-from lyrics import lyric_write_lock
+from lyrics import lyric_write_lock, lyric_target_bytes, lyric_target_revision, MAX_LYRIC_BYTES
 
 OUTPUT = sys.stdout
 OWN_PROCESS_GROUP = False
 SUPPORTED = {".wav", ".flac", ".mp3", ".ogg", ".oga", ".m4a", ".aac", ".opus", ".mp4", ".mkv", ".webm", ".aiff", ".aif", ".wma"}
+_UNSPECIFIED_TARGET = object()
 
 
 class Cancelled(BaseException):
@@ -143,31 +145,68 @@ def require_runtime(config: ExtractionConfig, reference: str) -> None:
         raise ValueError("Local lyric models are not configured. Missing: " + "; ".join(absent) + ". Nothing was downloaded and existing lyrics were kept.")
 
 
-def atomic_result(target: Path, data: dict) -> None:
+def atomic_result(target: Path, data: dict, expected_revision=_UNSPECIFIED_TARGET) -> None:
+    """Commit a model result, optionally against the raw target seen before inference.
+
+    The two-argument compatibility API remains an immediate serialized write.
+    Long-running worker jobs must pass their captured raw revision (including
+    explicit None for an initially absent target).
+    """
+    target = Path(target)
     with lyric_write_lock(target):
-        _atomic_result_unlocked(target, data)
+        original = lyric_target_bytes(target)
+        actual = hashlib.sha256(original).hexdigest() if original is not None else None
+        if expected_revision is not _UNSPECIFIED_TARGET and actual != expected_revision:
+            raise ValueError('The lyric file changed during extraction. Newer edits were kept; reopen them before retrying.')
+        _atomic_result_unlocked(target, data, original)
 
 
-def _atomic_result_unlocked(target: Path, data: dict) -> None:
+def _atomic_result_unlocked(target: Path, data: dict, original: bytes | None) -> None:
     data = dict(data)
+    # An explicit refresh of the same recording keeps its origin mapping, but
+    # never carries an earlier publication/approval into newly recognized text.
+    if original is not None:
+        try:
+            previous = json.loads(original.decode('utf-8-sig'))
+        except (ValueError, UnicodeError):
+            previous = None
+        identity = data.get('source_sha256')
+        if (isinstance(previous, dict) and isinstance(identity, str) and len(identity) == 64
+                and previous.get('source_sha256') == identity):
+            for key in ('song_id', 'recording_id', 'origin_id', 'source_id', 'origin_song_id',
+                        'source', 'origin', 'provenance', 'import_provenance'):
+                if key not in data and key in previous:
+                    data[key] = previous[key]
     # Model output can never inherit an earlier explicit human approval.
     data.pop("human_review", None)
+    if 'reviewed' in data:
+        data['reviewed'] = False
+    data.pop('publication', None)
     if target.is_symlink():
         raise ValueError("Save lyrics to a regular JSON file rather than a symbolic link.")
+    payload = json.dumps(data, ensure_ascii=False, allow_nan=False, indent=2).encode('utf-8')
+    if len(payload) > MAX_LYRIC_BYTES:
+        raise ValueError('The extracted lyric file exceeds the supported 8 MB saved-file size.')
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".extract-", suffix=".json", dir=target.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, allow_nan=False, indent=2)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        if target.exists():
+        if lyric_target_bytes(target) != original:
+            raise ValueError('The lyric file changed while saving extraction. Newer edits were kept.')
+        if original is not None:
             history = target.parent / "history"
             if history.is_symlink():
                 raise ValueError("Refusing a symbolic-link lyric history directory.")
             history.mkdir(exist_ok=True, mode=0o700)
-            backup = history / (target.stem + "-" + str(time.time_ns()) + ".json")
-            shutil.copy2(target, backup)
+            backup = history / (target.stem + "-" + str(time.time_ns()) + '-' + uuid.uuid4().hex[:8] + ".json")
+            with backup.open('xb') as handle:
+                handle.write(original); handle.flush(); os.fsync(handle.fileno())
+            backup.chmod(0o600)
+        if lyric_target_bytes(target) != original:
+            raise ValueError('The lyric file changed while saving extraction. Newer edits were kept.')
         os.replace(temporary, target)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -180,6 +219,8 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
         raise ValueError("Save extracted lyrics to a separate .json file.")
     if len(reference) > 20000:
         raise ValueError("The supplied lyric sheet is limited to 20,000 characters.")
+    with lyric_write_lock(output):
+        expected_output_revision = lyric_target_revision(output)
     before_size, before_mtime, fingerprint, duration = validate_source(source, config.media_library_path)
     require_runtime(config, reference)
     prepare_environment(config)
@@ -209,7 +250,7 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
                 source_mtime=before_mtime / 1e9, created_at=int(time.time()), reviewed=False)
     data.setdefault("pipeline",{})["gpu_schedule"]={"policy":"phase-scoped-exclusive","phases":gpu_timings()}
     data["quality"] = assess(data)
-    atomic_result(output, data)
+    atomic_result(output, data, expected_output_revision)
     return data
 
 
