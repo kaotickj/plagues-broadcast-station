@@ -48,7 +48,7 @@ backups available; executable rollback must not revert lyric or media data.
 
 ## Source verification
 
-The combined source passed 304 tests and 36 subtests on the local Linux host.
+The combined source passed 312 tests and 36 subtests on the local Linux host.
 Independent native Qt acceptance passed 36 workflow checks with disposable data.
 A muted synthetic playback/local-recording check produced valid H.264/AAC output.
 The first full run's isolated GPU-mock environment failure was corrected without
@@ -60,8 +60,17 @@ High scores did not verify the opening words, and token grouping fragmented sung
 lines. New preparation retains raw evidence and flags uncertainty. A separate
 CPU medium.en pass over the opening/ending disagreed with the saved wording;
 its words are review material, not verified corrections. Full-song recognition
-accuracy and audible ground truth remain unverified. The shared GPU lock was
-held during the bounded probe, so GPU inference was deferred without a bypass.
+accuracy and audible ground truth remain unverified. After the existing automated
+lyrics job finished naturally under a supported pause, two bounded Vulkan checks
+also completed. Their words disagreed with the independent CPU pass; every raw
+result remains review evidence. The existing GPU lock was honored throughout.
+
+The first Windows CI run exposed a real cache-freshness defect: Windows creation
+time cannot substitute for content-change time. The candidate now uses native
+`FILE_BASIC_INFO.ChangeTime`, with conservative content hashing when unavailable,
+for both recordings and stored lyric files. The original mutation/revocation
+assertion remains in the suite. A path-dependent test mock was made portable.
+CI checks out the exact PR head so artifact provenance identifies that commit.
 
 Native package receipts, exact artifact hashes and rollback details accompany
 the candidate separately. Linux-host validation does not certify Windows or

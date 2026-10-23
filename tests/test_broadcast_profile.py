@@ -115,8 +115,8 @@ def test_bad_readback_or_interrupted_update_does_not_select_replacement(store):
 def test_namespace_follows_actual_directory_including_a_literal_tilde(tmp_path,monkeypatch):
     from pathlib import Path
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(Path,'expanduser',lambda path:tmp_path/'simulated-home'/str(path)[2:]
-                        if str(path).startswith('~/') else path)
+    monkeypatch.setattr(Path,'expanduser',lambda path:tmp_path.joinpath('simulated-home',*path.parts[1:])
+                        if path.parts and path.parts[0]=='~' else path)
     backend=FakeCredentials()
     literal=BroadcastProfileStore('~/state',backend_factory=lambda:backend)
     alias=BroadcastProfileStore(tmp_path/'~'/'state',backend_factory=lambda:backend)

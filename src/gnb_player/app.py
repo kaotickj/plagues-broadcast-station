@@ -18,6 +18,7 @@ from .library import Track, scan_media, MEDIA_EXTENSIONS
 from .playback import PlaybackEngine
 from .stage import BroadcastStage, IMAGE_SUFFIXES, VIDEO_SUFFIXES, DEFAULT_WAVEFORM_COLOR, waveform_color
 from .lyrics import load_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path
+from .file_state import file_change_stamp
 from .lyric_review import document_revision, is_approved, edit_document, retarget_review, save_review_document
 from .lyric_editor import TimedLyricsEditor, stored_review_notes, parse_seconds
 from .extraction import ExtractionConfig, discover_config, config_status, build_command, parse_worker_event, default_data_dir
@@ -350,7 +351,8 @@ class MainWindow(QMainWindow):
             if location:
                 try:
                     state=Path(location).stat()
-                    self._lyric_file_stamps[key]=(state.st_size,state.st_mtime_ns,state.st_ctime_ns,state.st_ino)
+                    stored_stamp=file_change_stamp(location,state)
+                    self._lyric_file_stamps[key]=stored_stamp if stored_stamp is not None else ('content',fingerprint(location))
                 except OSError:self._lyric_file_stamps.pop(key,None)
             try:self._lyric_stamps[key]=(track.path.stat().st_size,track.path.stat().st_mtime_ns)
             except OSError:self._invalid_lyrics.add(key)
@@ -371,17 +373,22 @@ class MainWindow(QMainWindow):
         if not document:return False
         try:
             state=track.path.stat();stamp=(state.st_size,state.st_mtime_ns)
-            check_stamp=(state.st_size,state.st_mtime_ns,state.st_ctime_ns,state.st_ino)
+            check_stamp=file_change_stamp(track.path,state)
             if key in self._lyric_stamps and self._lyric_stamps[key]!=stamp:return False
             location=self.lyric_files.get(key) or self._lyric_locations.get(key)
             if location and key in self._lyric_file_stamps:
                 stored=Path(location).stat()
-                if self._lyric_file_stamps[key]!=(stored.st_size,stored.st_mtime_ns,stored.st_ctime_ns,stored.st_ino):return False
+                stored_stamp=file_change_stamp(location,stored)
+                if stored_stamp is None:stored_stamp=('content',fingerprint(location))
+                if self._lyric_file_stamps[key]!=stored_stamp:return False
             checked=self._source_checks.get(key)
-            if not checked or checked[0]!=check_stamp:
+            if check_stamp is None or not checked or checked[0]!=check_stamp:
                 identity=fingerprint(track.path)
                 after=track.path.stat()
-                if check_stamp!=(after.st_size,after.st_mtime_ns,after.st_ctime_ns,after.st_ino):return False
+                after_stamp=file_change_stamp(track.path,after)
+                before_metadata=(state.st_size,state.st_mtime_ns,state.st_ctime_ns,state.st_ino)
+                after_metadata=(after.st_size,after.st_mtime_ns,after.st_ctime_ns,after.st_ino)
+                if check_stamp!=after_stamp or before_metadata!=after_metadata:return False
                 self._source_checks[key]=(check_stamp,identity)
             return not document.source_sha256 or document.source_sha256==self._source_checks[key][1]
         except OSError:return False
