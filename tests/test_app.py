@@ -209,3 +209,27 @@ def test_passing_result_preserves_playing_queue_and_independent_selection(window
     assert window.engine.tracks==tracks and window.engine.order.bag==[1] and window.engine.order.back==[1]
     assert window._selected_track()==tracks[1] and not audio_resets
     assert window.stage._lyrics is document and 'LYRICS READY' in window.playlist.item(0).text()
+
+
+def test_waveform_color_picker_persists_profile_and_cancel_preserves_choice(window,tmp_path,monkeypatch):
+    from PySide6.QtGui import QColor
+    monkeypatch.setattr('gnb_player.app.QColorDialog.getColor',lambda *args:QColor('#39FF14'))
+    window.wave_color.click()
+    assert window.stage._settings['waveform_color']=='#39ff14'
+    assert '#39FF14' in window.wave_color.text()
+    window.save_session()
+    saved=json.loads((window.data_dir/'session.json').read_text())
+    assert saved['settings']['waveform_color']=='#39ff14'
+    window.set_waveform_color('#0088ff')
+    window.load_profile(window.data_dir/'session.json')
+    assert window.visual_settings()['waveform_color']=='#39ff14'
+    monkeypatch.setattr('gnb_player.app.QColorDialog.getColor',lambda *args:QColor())
+    window.wave_color.click()
+    assert window.visual_settings()['waveform_color']=='#39ff14'
+
+
+def test_legacy_playlist_resets_waveform_color_to_original_gold(window,tmp_path):
+    legacy=tmp_path/'legacy.json';write_profile(legacy,[],[],{},settings={'brand':'Old station'})
+    window.set_waveform_color('#39ff14');window.load_profile(legacy)
+    assert window.visual_settings()['waveform_color']=='#dfbd7f'
+    assert window.stage._settings['waveform_color']=='#dfbd7f'
