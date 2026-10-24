@@ -120,6 +120,7 @@ class MainWindow(QMainWindow):
         self.export.error.connect(self._broadcast_error)
         self.export.finished.connect(self._export_finished)
         self.export.statistics.connect(self._broadcast_statistics)
+        self._broadcast_failure=''
         self._export_size = (1280,720); self._last_preview = 0
         self._build_ui(); self._connect()
         for label in [self.now_title,self.now_artist,self.lyric_status,self.broadcast_label,self.broadcast_stats]: label.setTextFormat(Qt.TextFormat.PlainText)
@@ -253,7 +254,7 @@ class MainWindow(QMainWindow):
         for field in (self.destination,self.stream_key):field.textChanged.connect(self._stream_fields_changed)
         self.output_mode.currentIndexChanged.connect(self._stream_fields_changed); self.resolution.currentIndexChanged.connect(self._stream_fields_changed); self.bitrate.valueChanged.connect(self._stream_fields_changed)
         row=QHBoxLayout(); self.choose_recording_button=self._button('Choose recording file',self.choose_recording); row.addWidget(self.choose_recording_button); self.start_output=self._button('Start output',self.start_broadcast,True); row.addWidget(self.start_output); self.stop_output=self._button('Stop output',self.stop_broadcast); self.stop_output.setEnabled(False); row.addWidget(self.stop_output); v.addLayout(row)
-        self.broadcast_label=QLabel('Offline · Program Output is ready for OBS capture.'); self.broadcast_label.setWordWrap(True); v.addWidget(self.broadcast_label)
+        self.broadcast_label=QLabel('Offline · Program Output is ready for OBS capture.'); self.broadcast_label.setWordWrap(True); self.broadcast_label.setAccessibleName('Output status'); v.addWidget(self.broadcast_label)
         self.broadcast_stats=QLabel(''); self.broadcast_stats.setWordWrap(True); v.addWidget(self.broadcast_stats)
         volume=QHBoxLayout(); volume.addWidget(QLabel('Monitor volume')); self.volume=QSlider(Qt.Orientation.Horizontal); self.volume.setRange(0,100); self.volume.setValue(70); self.volume.setAccessibleName('Local monitoring volume. Streaming audio level is unchanged.'); self.volume.valueChanged.connect(lambda n:self.engine.set_volume(n/100)); volume.addWidget(self.volume); v.addLayout(volume)
         tip=QLabel('Direct output includes only this program picture and its music—no microphone or other desktop sounds. For OBS, capture the Program Output window and this app’s audio. Prepare lyrics before starting an output.'); tip.setWordWrap(True); tip.setObjectName('muted'); v.addWidget(tip); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Broadcast')
@@ -1073,19 +1074,27 @@ class MainWindow(QMainWindow):
         if config and config.mode=='stream':result=redact(result,config.target,config.secrets)
         return result
 
-    def _broadcast_error(self,message):self._message(self._redact_broadcast(message))
+    def _broadcast_error(self,message):
+        self._broadcast_failure=self._redact_broadcast(message)
+        self.broadcast_label.setText('Output failed · '+self._broadcast_failure)
+        self._message(self._broadcast_failure)
 
     def choose_recording(self):
         name,_=QFileDialog.getSaveFileName(self,'Save local broadcast recording',str(Path.home()/'broadcast.mp4'),'MP4 recording (*.mp4);;Matroska recording (*.mkv)')
         if name:self.destination.setText(name); self.output_mode.setCurrentIndex(0)
     def start_broadcast(self):
-        if self._profile_busy:self._message('Wait for the protected profile operation before starting output.'); return
-        if self.extract_process.state()!=QProcess.ProcessState.NotRunning:self._message('Finish or cancel lyric extraction before starting output.'); return
-        target=self.destination.text().strip()
-        if not target:self.choose_recording(); target=self.destination.text().strip()
-        if not target:return
-        from .broadcast import BroadcastConfig
+        self._broadcast_failure=''
+        if self._profile_busy:self._broadcast_error('Wait for the protected profile operation before starting output.'); return
+        if self.extract_process.state()!=QProcess.ProcessState.NotRunning:self._broadcast_error('Finish or cancel lyric extraction before starting output.'); return
         mode='stream' if self.output_mode.currentIndex()==1 else 'record'
+        target=self.destination.text().strip()
+        if not target:
+            if mode=='stream':
+                self._broadcast_error('Enter an RTMP or RTMPS destination before starting the stream.'); return
+            self.choose_recording(); target=self.destination.text().strip()
+        if not target:
+            self._broadcast_status('Recording not started. Choose a new .mp4 or .mkv recording file.'); return
+        from .broadcast import BroadcastConfig
         if mode=='stream' and self.stream_key.text().strip():target=target.rstrip('/')+'/'+self.stream_key.text().strip().lstrip('/')
         self._export_size=(1920,1080) if self.resolution.currentIndex()==1 else (1280,720)
         try:
@@ -1100,7 +1109,9 @@ class MainWindow(QMainWindow):
         self.preview_timer.setInterval(50); self.start_output.setEnabled(True); self.stop_output.setEnabled(False); self._profile_controls()
         for b in [self.extract_button,self.batch_button,self.align_button]:b.setEnabled(True)
         if self._closing:QTimer.singleShot(0,self.close)
-    def _broadcast_status(self,message):self.broadcast_label.setText(self._redact_broadcast(message))
+    def _broadcast_status(self,message):
+        if self._broadcast_failure:self.broadcast_label.setText('Output failed · '+self._broadcast_failure)
+        else:self.broadcast_label.setText(self._redact_broadcast(message))
     def _broadcast_statistics(self,data):
         self.broadcast_stats.setText(' · '.join(f'{key.replace("_"," ")}: {value}' for key,value in data.items() if key in {'running','elapsed_seconds','video_frames','duplicated_video_frames','replaced_video_inputs','audio_frames','audio_dropped_frames','silence_frames','audio_buffer_seconds','delivery_lag_seconds','reconnects'} and type(value) in (int,float,bool)))
     def _schedule_save(self):
