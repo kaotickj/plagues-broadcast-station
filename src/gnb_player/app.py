@@ -269,6 +269,11 @@ class MainWindow(QMainWindow):
     def _models_tab(self):
         page=QWidget(); v=QVBoxLayout(page); form=QFormLayout(); self.model_fields={}
         v.addWidget(self._button('Set up / find models',self.open_model_setup,True))
+        self.separate_vocals=QCheckBox('Separate vocals before recognition')
+        self.separate_vocals.setAccessibleName('Separate vocals before recognition')
+        self.separate_vocals.setChecked(self.extract_config.separate_vocals)
+        self.separate_vocals.setToolTip('Unchecked: recognize the original mix, including during automatic review. Useful if separation loses the voice. Applies to new jobs; Extract & align applies the choice, or use Save model settings below to keep it. Existing lyrics are unchanged.')
+        v.addWidget(self.separate_vocals)
         self.model_resolution_status=QLabel(); self.model_resolution_status.setWordWrap(True); self.model_resolution_status.setTextFormat(Qt.TextFormat.PlainText); self.model_resolution_status.setAccessibleName('Automatic model location discovery'); v.addWidget(self.model_resolution_status)
         for key,label in [('python_path','Lyric runtime Python'),('model_root','Model folder'),('torch_home','Torch model cache'),('transcription_model_path','Whisper large-v3 location'),('review_model_path','Independent review model location'),('separator_model_path','Vocal separator location'),('alignment_model_path','Word alignment checkpoint'),('recognition_language','Recognition language (en or auto)'),('recognition_prompt','Optional recognition context'),('ollama_url','Local Ollama address'),('ollama_model','Ollama text model'),('gpu_python_path','GPU runtime Python'),('vulkan_binary','Whisper Vulkan executable'),('vulkan_model','Whisper Vulkan model'),('gpu_lock','Shared GPU lock (optional)')]:
             entry=QLineEdit(str(getattr(self.extract_config,key))); entry.setAccessibleName(label); self.model_fields[key]=entry; form.addRow(label,entry)
@@ -968,6 +973,7 @@ class MainWindow(QMainWindow):
     def save_model_settings(self):
         try:
             values=self.extract_config.to_dict(); values.update({key:entry.text().strip() for key,entry in self.model_fields.items()}); values['use_gpu']=self.gpu.isChecked()
+            values['separate_vocals']=self.separate_vocals.isChecked()
             explicit=set(values.get('explicit_paths',[]))
             for key in self._edited_model_paths:
                 if values.get(key):explicit.add(key)
@@ -979,6 +985,7 @@ class MainWindow(QMainWindow):
     def _sync_model_fields(self):
         for key,entry in self.model_fields.items():entry.setText(str(getattr(self.extract_config,key)))
         self.gpu.setChecked(self.extract_config.use_gpu)
+        self.separate_vocals.setChecked(self.extract_config.separate_vocals)
     def open_model_setup(self):
         if self.export.running or self.extract_process.state()!=QProcess.ProcessState.NotRunning:
             self._message('Finish the current output or extraction before changing model setup.');return
