@@ -6,7 +6,7 @@ try:
     from .lyrics_recognition import recognition_policy, cache_policy, segment_evidence
 except ImportError:
     from lyrics_recognition import recognition_policy, cache_policy, segment_evidence
-VERSION='automatic-review-3'
+VERSION='automatic-review-4'
 
 def token(text):return re.sub(r'[^\w]','',str(text).casefold())
 def flatten(data):return [w for cue in data.get('segments',[]) for w in cue.get('words',[])]
@@ -31,6 +31,9 @@ def suspect_cue(data,index):
         from lyrics_quality import artifact_suspected
     cue=data['segments'][index];words=cue.get('words',[])
     return bool(cue.get('needs_review') or artifact_suspected(data,index) or not valid(words)
+        or any(w.get('uncertain') or any(key in w and
+            (not isinstance(w[key],(int,float)) or not math.isfinite(w[key]) or w[key]<threshold)
+            for key,threshold in [('score',.35),('alignment_score',.15)]) for w in words)
         or (index and cue['start']<data['segments'][index-1]['end']-.1)
         or (index+1<len(data['segments']) and cue['end']>data['segments'][index+1]['start']+.1))
 
@@ -118,7 +121,7 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
         fresh=rechecks.get('confirm-gap-'+str(round(start,3)))
         if not within(secondary,start+1,end-1) and (activity(start+1,end-1)<.2 or (fresh is not None and not within(fresh,start+1,end-1))):
             verified_gaps.append({'start':start,'end':end,'verified':True,'method':'Two independent recognizers plus either quiet vocals or a fresh bounded large-model check found no lyric words.'})
-    remaining_suspect=any(c.get('needs_review') or not valid(c.get('words',[])) for c in new_cues)
+    remaining_suspect=any(suspect_cue(data,i) for i in range(len(new_cues)))
     unverified_gaps=[(a,b) for a,b in gaps(data) if a>0 and b<data['duration'] and not any(g['start']<=a+.1 and g['end']>=b-.1 for g in verified_gaps)]
     warnings=[]
     for warning in data.get('warnings',[]):
@@ -186,10 +189,14 @@ def review(source,work,data,progress,preserve_text=False):
     if assess(data)['status']=='pass':return data
     from lyrics_cache import restore,store
     wav=work/'recognition.wav'
-    if not wav.is_file() or not (data.get('pipeline') or {}).get('vocals_separated'):
-        if restore(source,wav):progress('separating',1,'Reusing the verified private vocal cache.')
+    if not wav.is_file():
+        if not (data.get('pipeline') or {}).get('vocals_separated'):
+            # Keep review on the same selected input as primary recognition.
+            # A disabled separator must never be re-enabled by automatic review.
+            decode(source,wav)
+        elif restore(source,wav):progress('separating',1,'Reusing the verified private vocal cache.')
         else:
-            vocals=work/'review-vocals.wav';separate_vocals(source,vocals,work,progress);wav=work/'review-recognition.wav';decode(vocals,wav);store(source,wav)
+            vocals=work/'review-vocals.wav';separate_vocals(source,vocals,work,progress);decode(vocals,wav);store(source,wav)
     audio,sr=sf.read(wav,dtype='float32');duration=len(audio)/sr
     window=max(1,int(sr*.25));padded=np.pad(audio,(0,(-len(audio))%window));energy=np.sqrt(np.mean(padded.reshape(-1,window)**2,axis=1));reference=max(float(np.quantile(energy,.95)),1e-7)
     def activity(a,b):

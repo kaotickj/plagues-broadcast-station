@@ -77,6 +77,9 @@ def assess(data):
             if a<last-.1 or b<=a or a<start-.1 or b>end+.1 or b-a>8:
                 flag('word_timing','Check overlapping, zero-length, or unusually stretched word timing.',a)
             last=b;words.append(word)
+            score=word.get('score')
+            if isinstance(score,(int,float)) and (not math.isfinite(score) or score<.35):
+                flag('word_confidence','An individual word has weak recognition confidence; check this passage.',a)
             if 'alignment_score' in word:
                 alignment=word['alignment_score']
                 if (not isinstance(alignment,(int,float)) or not math.isfinite(alignment)
