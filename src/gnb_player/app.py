@@ -989,7 +989,9 @@ class MainWindow(QMainWindow):
         report=self._model_resolution_report
         notes=[self._model_config_warning] if self._model_config_warning else []
         notes.extend(report.get('notes',[]))
-        self.model_resolution_status.setText('\n'.join(notes) or 'Using the model locations shown below.')
+        summary='Existing model/runtime paths found. Selected and automatic locations are shown below.' if status['ready'] else 'Some model/runtime files are unavailable. Check the paths and details below.'
+        self.model_resolution_status.setText((self._model_config_warning+'\n' if self._model_config_warning else '')+summary)
+        self.model_resolution_status.setToolTip('\n'.join(notes))
         paths=report.get('effective_model_paths',{})
         for key,component in [('transcription_model_path','transcription'),('review_model_path','review'),('separator_model_path','separator'),('alignment_model_path','alignment')]:
             entry=self.model_fields[key];resolved=str(paths.get(component,''))
@@ -997,8 +999,10 @@ class MainWindow(QMainWindow):
             entry.setToolTip('Effective location: '+resolved+'\nLeave empty to use automatic discovery; enter a path to keep a specific location.')
         self.model_fields['ollama_model'].setToolTip('Optional installed text-model tag. Audio transcription and review do not require an Ollama text model.')
         messages=['Local lyric model files detected.' if status['ready'] else 'Playback is ready. Lyric extraction needs a configured runtime and model files.']
+        messages.extend(notes)
         for key,info in report.get('fields',{}).items():
-            if info.get('missing_files'):messages.append(key+': '+info.get('explanation','Configured files are missing.')+' '+ '; '.join(map(str,info['missing_files'])))
+            label=self.model_fields[key].accessibleName() if key in self.model_fields else key
+            if info.get('missing_files'):messages.append(label+': '+info.get('explanation','Configured files are missing.')+' '+ '; '.join(map(str,info['missing_files'])))
         if not status['python_available']:messages.append('Lyric runtime Python is missing or is not an executable: '+self.extract_config.python_path)
         messages.extend('Missing model file: '+str(path) for path in status['missing_models'])
         if not status['ffmpeg_available']:messages.append('FFmpeg is missing from the application environment.')

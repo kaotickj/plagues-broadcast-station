@@ -5,6 +5,14 @@ change (`24cc6bf`, locally replayed as `42d140b`), and preserved phase-scoped GP
 patches. Original checkouts, their uncommitted work, installed binaries, launchers,
 lyrics and media remain outside this candidate and are not modified by the work.
 
+## 0.2.4rc5 model settings layout follow-up
+
+The top discovery summary stays concise so the first model fields remain visible
+at the minimum supported window size. Detailed resolution notes remain available
+in its tooltip and the diagnostics below the fields. Model routing is unchanged
+from RC4. The final native package must identify this follow-up source, rather
+than reuse the earlier RC4 executable.
+
 ## 0.2.4rc4 existing model discovery follow-up
 
 The player checks known existing shared Linux model/runtime locations for unset

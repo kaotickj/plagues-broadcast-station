@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 os.environ.setdefault('QT_MEDIA_BACKEND', 'ffmpeg')
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -153,7 +153,17 @@ def test_shared_resolution_is_visible_without_populating_component_overrides(sta
         assert entry.placeholderText() == 'Automatic: ' + str(effective[component])
         assert str(effective[component]) in entry.toolTip()
     assert window.model_resolution_status.accessibleName() == 'Automatic model location discovery'
-    assert 'shared' in window.model_resolution_status.text().lower()
+    assert window.model_resolution_status.text().strip()
+    for note in window._model_resolution_report['notes']:
+        assert note in window.model_resolution_status.toolTip()
+        assert note in window.model_status.text()
+    window.resize(1030, 720)
+    scroll = show_models(window)
+    QTest.qWait(60)
+    QApplication.processEvents()
+    runtime = window.model_fields['python_path']
+    runtime_rect = runtime.rect().translated(runtime.mapTo(scroll.viewport(), QPoint()))
+    assert scroll.viewport().rect().contains(runtime_rect)
     assert window.extract_config.cache_dir == str(window.data_dir / 'lyrics-cache')
     assert not window.engine.playing and not window.export.running
 
