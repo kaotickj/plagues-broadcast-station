@@ -17,7 +17,11 @@ from test_broadcast_profile import FakeCredentials, profile
 @pytest.fixture
 def desk(tmp_path,monkeypatch):
     monkeypatch.setattr('gnb_player.app.discover_config',lambda:ExtractionConfig())
-    monkeypatch.setattr('gnb_player.app.config_status',lambda config:{'ready':False,'missing_models':[]})
+    monkeypatch.setattr('gnb_player.app.resolve_existing_models',lambda config:(config,{
+        'fields':{},'notes':[],'effective_model_paths':{},'resolved_values':{}}))
+    monkeypatch.setattr('gnb_player.app.config_status',lambda config:{
+        'ready':False,'missing_models':[],'python_available':False,
+        'ffmpeg_available':True,'ffprobe_available':True})
     # No model discovery, home/cache inspection, real credential classes or output.
     app=QApplication.instance() or QApplication([])
     backend=FakeCredentials(); data=tmp_path/'isolated state with spaces'

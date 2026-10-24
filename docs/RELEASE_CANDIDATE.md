@@ -5,6 +5,17 @@ change (`24cc6bf`, locally replayed as `42d140b`), and preserved phase-scoped GP
 patches. Original checkouts, their uncommitted work, installed binaries, launchers,
 lyrics and media remain outside this candidate and are not modified by the work.
 
+## 0.2.4rc4 existing model discovery follow-up
+
+The player checks known existing shared Linux model/runtime locations for unset
+or recognized legacy-default fields and keeps the portable user-local fallback.
+Valid custom locations are retained; missing intentional custom locations remain
+visible with diagnostics. Explicit path edits are recorded per station. Individual
+component overrides can remain empty: the GUI shows their effective automatic
+locations. Discovery reads file metadata, never downloads, copies or loads models.
+See [model locations](MODEL_LOCATIONS.md). This package must be rebuilt from its
+own source identity; the earlier RC3 artifact does not include this change.
+
 ## 0.2.4rc3 preview preference follow-up
 
 Unapproved saved lyric preview defaults on only for a station without a saved

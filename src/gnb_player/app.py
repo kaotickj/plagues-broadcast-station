@@ -21,7 +21,7 @@ from .lyrics import load_lyrics, load_imported_lyrics, save_lyrics, find_lyrics,
 from .file_state import file_change_stamp
 from .lyric_review import document_revision, is_approved, edit_document, retarget_review, save_review_document
 from .lyric_editor import TimedLyricsEditor, stored_review_notes, parse_seconds
-from .extraction import ExtractionConfig, discover_config, config_status, build_command, parse_worker_event, default_data_dir
+from .extraction import ExtractionConfig, discover_config, config_status, build_command, parse_worker_event, default_data_dir, resolve_existing_models, MODEL_PATH_FIELDS
 from .settings import atomic_json, read_profile, write_profile, load_m3u, save_m3u, starter_profile
 
 APP_NAME = "Plague's Broadcast Station"
@@ -101,8 +101,11 @@ class MainWindow(QMainWindow):
         self._closing = False; self._seek_drag = False; self._track_generation = 0; self._displayed_track = None
         self.stage = BroadcastStage(); self.stage.setWindowTitle(APP_NAME + ' · Program Output')
         self.engine = PlaybackEngine(self)
+        self._edited_model_paths=set(); self._model_config_warning=''
         try: self.extract_config = ExtractionConfig.from_dict(self.saved.get('extraction', discover_config().to_dict()))
-        except (TypeError, ValueError): self.extract_config = discover_config()
+        except (TypeError, ValueError) as error:
+            self.extract_config = discover_config(); self._model_config_warning='Saved model settings could not be read: '+str(error)
+        self.extract_config,self._model_resolution_report=resolve_existing_models(self.extract_config)
         self.extract_config.cache_dir = str(self.data_dir/'lyrics-cache')
         self.extract_process = QProcess(self)
         self.extract_process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
@@ -258,9 +261,12 @@ class MainWindow(QMainWindow):
     def _models_tab(self):
         page=QWidget(); v=QVBoxLayout(page); form=QFormLayout(); self.model_fields={}
         v.addWidget(self._button('Set up / find models',self.open_model_setup,True))
+        self.model_resolution_status=QLabel(); self.model_resolution_status.setWordWrap(True); self.model_resolution_status.setTextFormat(Qt.TextFormat.PlainText); self.model_resolution_status.setAccessibleName('Automatic model location discovery'); v.addWidget(self.model_resolution_status)
         for key,label in [('python_path','Lyric runtime Python'),('model_root','Model folder'),('torch_home','Torch model cache'),('transcription_model_path','Whisper large-v3 location'),('review_model_path','Independent review model location'),('separator_model_path','Vocal separator location'),('alignment_model_path','Word alignment checkpoint'),('recognition_language','Recognition language (en or auto)'),('recognition_prompt','Optional recognition context'),('ollama_url','Local Ollama address'),('ollama_model','Ollama text model'),('gpu_python_path','GPU runtime Python'),('vulkan_binary','Whisper Vulkan executable'),('vulkan_model','Whisper Vulkan model'),('gpu_lock','Shared GPU lock (optional)')]:
             entry=QLineEdit(str(getattr(self.extract_config,key))); entry.setAccessibleName(label); self.model_fields[key]=entry; form.addRow(label,entry)
         self.model_fields['recognition_prompt'].setMaxLength(500)
+        for key in MODEL_PATH_FIELDS:
+            if key in self.model_fields:self.model_fields[key].textEdited.connect(lambda _,key=key:self._edited_model_paths.add(key))
         self.model_fields['recognition_prompt'].setToolTip('Optional context can bias recognition. Leave empty to avoid introducing words; recording filenames are never used as prompts.')
         self.model_fields['recognition_language'].setToolTip('Use en for English, auto for language detection, or a supported language code. English-only models retain English.')
         v.addLayout(form); self.gpu=QCheckBox('Use GPU when available; wait while another job uses it'); self.gpu.setChecked(self.extract_config.use_gpu); v.addWidget(self.gpu)
@@ -948,8 +954,18 @@ class MainWindow(QMainWindow):
         else:self.extract_process.kill()
     def save_model_settings(self):
         try:
-            values=self.extract_config.to_dict(); values.update({key:entry.text().strip() for key,entry in self.model_fields.items()}); values['use_gpu']=self.gpu.isChecked(); self.extract_config=ExtractionConfig.from_dict(values); self.update_model_status(); self._schedule_save(); return True
+            values=self.extract_config.to_dict(); values.update({key:entry.text().strip() for key,entry in self.model_fields.items()}); values['use_gpu']=self.gpu.isChecked()
+            explicit=set(values.get('explicit_paths',[]))
+            for key in self._edited_model_paths:
+                if values.get(key):explicit.add(key)
+                else:explicit.discard(key)
+            values['explicit_paths']=sorted(explicit)
+            self.extract_config,self._model_resolution_report=resolve_existing_models(ExtractionConfig.from_dict(values))
+            self._edited_model_paths.clear(); self._model_config_warning=''; self._sync_model_fields(); self.update_model_status(); self._schedule_save(); return True
         except Exception as error:self._message(str(error)); return False
+    def _sync_model_fields(self):
+        for key,entry in self.model_fields.items():entry.setText(str(getattr(self.extract_config,key)))
+        self.gpu.setChecked(self.extract_config.use_gpu)
     def open_model_setup(self):
         if self.export.running or self.extract_process.state()!=QProcess.ProcessState.NotRunning:
             self._message('Finish the current output or extraction before changing model setup.');return
@@ -961,12 +977,33 @@ class MainWindow(QMainWindow):
         self.model_setup_dialog.configured.connect(self._model_setup_applied)
         self.model_setup_dialog.show()
     def _model_setup_applied(self,config):
-        self.extract_config=ExtractionConfig.from_dict(config.to_dict())
-        for key,entry in self.model_fields.items():entry.setText(str(getattr(self.extract_config,key)))
-        self.gpu.setChecked(self.extract_config.use_gpu);self.update_model_status()
+        values=config.to_dict();explicit=set(values.get('explicit_paths',[]))
+        for key in MODEL_PATH_FIELDS:
+            if values.get(key) and values.get(key)!=getattr(self.extract_config,key):explicit.add(key)
+        values['explicit_paths']=sorted(explicit)
+        self.extract_config,self._model_resolution_report=resolve_existing_models(ExtractionConfig.from_dict(values))
+        self._edited_model_paths.clear();self._model_config_warning='';self._sync_model_fields();self.update_model_status()
         if self.save_session():self._message('Model settings saved. Selected recognizer: '+self.extract_config.engine)
     def update_model_status(self):
-        status=config_status(self.extract_config); self.model_status.setText('Local lyric models detected.' if status['ready'] else 'Playback is ready. Lyric extraction needs a configured runtime and model files. '+ '; '.join(status['missing_models'][:2]))
+        status=config_status(self.extract_config)
+        report=self._model_resolution_report
+        notes=[self._model_config_warning] if self._model_config_warning else []
+        notes.extend(report.get('notes',[]))
+        self.model_resolution_status.setText('\n'.join(notes) or 'Using the model locations shown below.')
+        paths=report.get('effective_model_paths',{})
+        for key,component in [('transcription_model_path','transcription'),('review_model_path','review'),('separator_model_path','separator'),('alignment_model_path','alignment')]:
+            entry=self.model_fields[key];resolved=str(paths.get(component,''))
+            entry.setPlaceholderText('Automatic: '+resolved)
+            entry.setToolTip('Effective location: '+resolved+'\nLeave empty to use automatic discovery; enter a path to keep a specific location.')
+        self.model_fields['ollama_model'].setToolTip('Optional installed text-model tag. Audio transcription and review do not require an Ollama text model.')
+        messages=['Local lyric model files detected.' if status['ready'] else 'Playback is ready. Lyric extraction needs a configured runtime and model files.']
+        for key,info in report.get('fields',{}).items():
+            if info.get('missing_files'):messages.append(key+': '+info.get('explanation','Configured files are missing.')+' '+ '; '.join(map(str,info['missing_files'])))
+        if not status['python_available']:messages.append('Lyric runtime Python is missing or is not an executable: '+self.extract_config.python_path)
+        messages.extend('Missing model file: '+str(path) for path in status['missing_models'])
+        if not status['ffmpeg_available']:messages.append('FFmpeg is missing from the application environment.')
+        if not status['ffprobe_available']:messages.append('FFprobe is missing from the application environment.')
+        self.model_status.setText('\n'.join(messages))
 
     def _stream_fields_changed(self, *_):
         if not self._profile_busy:self.stream_profile_status.setText('Current fields are session-only until Save/update. Clear fields does not forget a saved profile.')

@@ -104,6 +104,8 @@ If Save fails or reports a conflict, keep the editor open and read the status. A
 
 If lyrics will not appear on Program Output, check Picture & sound > Show sing-along lyrics and Lyrics > More lyric options > Preview unapproved saved lyrics on Program Output. Preview defaults on for a new station and remembers your last choice in its saved playlist/session. Lyrics-ready tracks only independently limits playback to approved recordings. Save pending corrections before previewing their saved timing. Extraction failures or uncertain recognition need review; preserve the raw findings rather than guessing corrections.
 
+Lyric models checks existing local runtime/model locations. On Linux it can reuse the shared /var/lib/gnb-lyrics and /opt runtime locations when present. Custom paths remain selected; missing custom files are explained. Empty component overrides show Automatic with the effective path. Discovery does not download or copy models. The optional Ollama text-model tag is not required for audio lyric extraction.
+
 If controls or behavior seem older than expected, compare this running version and recorded build identity with the intended package. An already open older window keeps its old code. Check desktop, menu and panel shortcut targets; close the older window yourself before launching the intended build. Help never replaces the app or starts a download.
 """
 
