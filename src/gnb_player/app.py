@@ -453,7 +453,7 @@ class MainWindow(QMainWindow):
                 self.lyric_save_status.setText('Unsaved changes. '+('The saved revision changed; reload it before editing again.' if buffer.get('conflict') else 'Save lyrics to keep these changes for this recording.'))
             else:
                 self.lyric_text.set_document(document)
-                self.lyric_save_status.setText('Saved · '+('Reviewed and approved for this exact revision.' if ready else 'Draft saved on this device. Review notes and lyrics, then approve.'))
+                self.lyric_save_status.setText('Saved empty draft · No lyric lines stored.' if not document.segments else 'Saved · '+('Reviewed and approved for this exact revision.' if ready else 'Draft saved on this device. Review notes and lyrics, then approve.'))
         else:
             self.lyric_status.setText(track.title+' · No prepared lyrics for this recording yet.')
             self.lyric_text.set_rows(buffer['rows']) if buffer else self.lyric_text.set_document(None)
@@ -948,10 +948,14 @@ class MainWindow(QMainWindow):
         completed=self._extract_current; self._extract_current=None; self._extract_context=None
         if not self._extract_queue:self.preparation_progress.hide()
         if completed:self._display_relevant_document(completed,self.documents.get(str(completed.path))); self._refresh_lyric_label(completed)
-        if code and not self._closing:
+        if code and not self._closing and completed and self._editor_track and self._editor_track.path==completed.path:
             failure=getattr(self,'_extract_failure','')
             prefix='Extraction failed.' if failure else 'Extraction stopped or failed.'
             self.lyric_status.setText(prefix+' Existing lyrics were preserved. '+(failure or self._extract_log[-250:]))
+            if str(completed.path) not in self._lyric_buffers:
+                prior=self.documents.get(str(completed.path))
+                retained='Previous saved lyrics retained.' if prior and prior.segments else 'Previous empty draft retained.' if prior else 'No saved lyrics for this recording.'
+                self.lyric_save_status.setText('Extraction failed · No replacement saved. '+retained)
         self._update_review_controls()
         if not self._closing:QTimer.singleShot(300,self._next_extraction)
     def cancel_extraction(self):

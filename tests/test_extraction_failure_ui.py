@@ -7,8 +7,8 @@ import pytest
 from PySide6.QtCore import QByteArray, QProcess
 
 from gnb_player.lyric_review import document_revision, is_approved
-from gnb_player.lyrics import load_lyrics
-from test_app import window
+from gnb_player.lyrics import load_lyrics, save_lyrics
+from test_app import window, add_fixture_tracks
 from test_lyrics_review_ui import open_draft, pending
 
 
@@ -74,3 +74,38 @@ def test_failed_extraction_keeps_saved_revision_edits_and_actionable_error(
         assert 'Unsaved' in window.lyric_save_status.text()
         assert window.save_lyrics_button.isEnabled()
     assert not (target.parent / 'history').exists()
+
+
+@pytest.mark.parametrize('prior_state',['none','empty','nonempty'])
+def test_failed_job_never_labels_old_or_empty_draft_as_newly_saved(window,tmp_path,pending,monkeypatch,prior_state):
+    target=None
+    if prior_state=='none':
+        track=add_fixture_tracks(window,tmp_path,1)[0]
+        window._display_document(track,None)
+    else:
+        tracks,target=open_draft(window,tmp_path,pending);track=tracks[0]
+        if prior_state=='empty':
+            doc=load_lyrics(target);doc.segments=[];save_lyrics(doc,target)
+            window._lyrics_ready(track,target,load_lyrics(target))
+            assert 'Saved empty draft' in window.lyric_save_status.text()
+    before=target.read_bytes() if target else None
+    window._extract_current=track;window._extract_failure='Rejected implausible recognition fixture.'
+    monkeypatch.setattr(window,'_extract_output',lambda:None)
+    monkeypatch.setattr(window,'_next_extraction',lambda:None)
+    window._extract_finished(1,QProcess.ExitStatus.NormalExit)
+    assert window.lyric_save_status.text().startswith('Extraction failed · No replacement saved.')
+    expected={'none':'No saved lyrics for this recording.','empty':'Previous empty draft retained.','nonempty':'Previous saved lyrics retained.'}
+    assert expected[prior_state] in window.lyric_save_status.text()
+    if target:assert target.read_bytes()==before
+
+
+def test_other_recording_failure_keeps_current_recording_status(window,tmp_path,pending,monkeypatch):
+    tracks,target=open_draft(window,tmp_path,pending,count=2)
+    displayed=window._editor_track
+    failing=next(track for track in tracks if track.path!=displayed.path)
+    before=(window.lyric_status.text(),window.lyric_save_status.text(),window.lyric_text.raw_rows())
+    window._extract_current=failing;window._extract_failure='Another recording failed.'
+    monkeypatch.setattr(window,'_extract_output',lambda:None)
+    monkeypatch.setattr(window,'_next_extraction',lambda:None)
+    window._extract_finished(1,QProcess.ExitStatus.NormalExit)
+    assert (window.lyric_status.text(),window.lyric_save_status.text(),window.lyric_text.raw_rows())==before
