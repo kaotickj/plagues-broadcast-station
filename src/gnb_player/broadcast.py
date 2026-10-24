@@ -131,6 +131,7 @@ class BroadcastSession(QObject):
     status = Signal(str)
     error = Signal(str)
     statistics = Signal(dict)
+    diagnostic = Signal(dict)
     finished = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -154,6 +155,28 @@ class BroadcastSession(QObject):
         self._started_at = 0.0
         self._reconnects = 0
         self._transport: Event | None = None
+        self._attempt_number = 0
+
+    def _diagnostic(self, event: str, **details) -> None:
+        """Emit bounded, credential-redacted facts without commands or endpoints."""
+        config = self._config
+        target = config.target if config else ""
+        secrets = config.secrets if config else ()
+
+        def safe(value):
+            if isinstance(value, str):
+                return redact(value, target, secrets)
+            if value is None or isinstance(value, bool) or isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return value if math.isfinite(value) else None
+            if isinstance(value, dict):
+                return {key: safe(item) for key, item in list(value.items())[:32]}
+            if isinstance(value, (list, tuple)):
+                return [safe(item) for item in value[-12:]]
+            return None
+
+        self.diagnostic.emit(safe({"event": event, "timestamp": time.time(), **details}))
 
     @property
     def running(self) -> bool:
@@ -176,6 +199,10 @@ class BroadcastSession(QObject):
             if self._image is not None:
                 self._frame = self._image_bytes(self._image, config)
             self._started_at = time.monotonic()
+            self._attempt_number = 0
+        self._diagnostic("start_requested", mode=config.mode, width=config.width,
+                         height=config.height, fps=config.fps, bitrate_kbps=config.bitrate_kbps,
+                         counters=self._snapshot())
         self.status.emit("Starting local recording…" if config.mode == "record" else "Connecting to the streaming server…")
         self._manager = Thread(target=self._run, name="broadcast-encoder", daemon=True)
         self._manager.start()
@@ -185,6 +212,7 @@ class BroadcastSession(QObject):
         if not self.running:
             return
         self._stop.set()
+        self._diagnostic("stop_requested", user_stop=True, counters=self._snapshot())
         self.status.emit("Finishing the recording…" if self._config and self._config.mode == "record" else "Stopping the stream…")
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -262,18 +290,27 @@ class BroadcastSession(QObject):
     def _run(self) -> None:
         config = self._config
         assert config is not None
+        last_problem = None
         try:
             attempts = config.reconnect_attempts if config.mode == "stream" else 0
             for number in range(attempts + 1):
                 if self._stop.is_set():
                     break
+                self._attempt_number = number + 1
+                self._diagnostic("attempt_started", attempt=self._attempt_number)
                 problem = self._run_once(config)
                 if self._stop.is_set():
                     if problem and problem.startswith("Encoder shutdown timed out"):
+                        last_problem = problem
+                        self._diagnostic("attempt_failed", attempt=self._attempt_number,
+                                         reason=problem, user_stop=True, counters=self._snapshot())
                         self.error.emit(problem)
                     break
                 if problem is None:
                     problem = "The encoder ended before the broadcast was stopped."
+                last_problem = problem
+                self._diagnostic("attempt_failed", attempt=self._attempt_number,
+                                 reason=problem, user_stop=False, counters=self._snapshot())
                 if number >= attempts:
                     self.error.emit(redact(problem, config.target, config.secrets))
                     break
@@ -281,15 +318,23 @@ class BroadcastSession(QObject):
                     self._reconnects += 1
                     self._audio.clear()
                 self.status.emit(f"Connection lost. Reconnecting ({number + 1}/{attempts})…")
+                self._diagnostic("retry_scheduled", attempt=self._attempt_number,
+                                 next_attempt=number + 2, delay_seconds=min(10.0, 2.0 ** number),
+                                 reason=problem, counters=self._snapshot())
                 self.statistics.emit(self._snapshot())
                 if self._stop.wait(min(10.0, 2.0 ** number)):
                     break
         except Exception as exception:
+            last_problem = f"The broadcast encoder could not start: {exception}"
+            self._diagnostic("attempt_failed", attempt=self._attempt_number,
+                             reason=last_problem, user_stop=self._stop.is_set(), counters=self._snapshot())
             self.error.emit(redact(f"The broadcast encoder could not start: {exception}", config.target, config.secrets))
         finally:
             with self._lock:
                 self._running = False
             self.statistics.emit(self._snapshot())
+            self._diagnostic("finished", user_stop=self._stop.is_set(), reason=last_problem,
+                             counters=self._snapshot())
             self.status.emit("Recording finished." if config.mode == "record" else "Stream stopped.")
             self.finished.emit()
 
@@ -317,7 +362,7 @@ class BroadcastSession(QObject):
                 transport_stop.wait(min(.02, delay))
             return False
 
-        def connect(listener: socket.socket) -> socket.socket | None:
+        def connect(listener: socket.socket, feed: str) -> socket.socket | None:
             began = time.monotonic()
             while not stopped() and time.monotonic() - began < 12:
                 try:
@@ -333,12 +378,12 @@ class BroadcastSession(QObject):
                 except OSError:
                     return None
             if not stopped():
-                errors.append("The encoder did not accept its local audio/video connection.")
+                errors.append(feed + " feed: The encoder did not accept its local audio/video connection.")
                 transport_stop.set()
             return None
 
         def stream_video(listener: socket.socket) -> None:
-            client = connect(listener)
+            client = connect(listener, "video")
             if client is None:
                 return
             try:
@@ -375,7 +420,7 @@ class BroadcastSession(QObject):
                     sequence += 1
             except (OSError, TimeoutError) as error:
                 if not self._stop.is_set():
-                    errors.append(redact(str(error), config.target, config.secrets))
+                    errors.append(redact("video feed: " + str(error), config.target, config.secrets))
                     transport_stop.set()
             finally:
                 try:
@@ -385,7 +430,7 @@ class BroadcastSession(QObject):
                 client.close()
 
         def stream_audio(listener: socket.socket) -> None:
-            client = connect(listener)
+            client = connect(listener, "audio")
             if client is None:
                 return
             try:
@@ -415,7 +460,7 @@ class BroadcastSession(QObject):
                     sequence += 1
             except OSError as error:
                 if not self._stop.is_set():
-                    errors.append(redact(str(error), config.target, config.secrets))
+                    errors.append(redact("audio feed: " + str(error), config.target, config.secrets))
                     transport_stop.set()
             finally:
                 try:
@@ -433,6 +478,8 @@ class BroadcastSession(QObject):
             if os.name == "nt":
                 options["creationflags"] = subprocess.CREATE_NO_WINDOW
             process = subprocess.Popen(build_command(config, video.getsockname()[1], audio.getsockname()[1]), **options)
+            self._diagnostic("encoder_spawned", attempt=self._attempt_number,
+                             pid=getattr(process, "pid", None))
 
             def read_errors() -> None:
                 assert process is not None and process.stderr is not None
@@ -493,4 +540,8 @@ class BroadcastSession(QObject):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.wait(timeout=2)
+            if process is not None:
+                self._diagnostic("encoder_exit", attempt=self._attempt_number,
+                                 returncode=process.poll(), stderr_tail=" ".join(stderr_lines)[-1800:],
+                                 local_feed_errors=list(errors), counters=self._snapshot())
             self._transport = None

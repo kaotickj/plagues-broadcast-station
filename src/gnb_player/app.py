@@ -1,6 +1,6 @@
 """Operator desk for Plague's Broadcast Station. The program window stays clean."""
 from __future__ import annotations
-import argparse, json, os, sys
+import argparse, json, os, sys, time
 from copy import deepcopy
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QProcess, QProcessEnvironment, QSize
@@ -115,7 +115,13 @@ class MainWindow(QMainWindow):
         self.extract_process.errorOccurred.connect(self._process_error)
         self._extract_log = ''
         from .broadcast import BroadcastSession
+        from .output_diagnostics import OutputDiagnostics
+        from .help_dialog import _build_details
+        self.output_diagnostics=OutputDiagnostics(self.data_dir/'output-diagnostics.json',
+                                                {'app_version':__version__,'build':_build_details()})
+        self._last_output_diagnostic_stats=0.0
         self.export = BroadcastSession(self)
+        self.export.diagnostic.connect(self._output_diagnostic)
         self.export.status.connect(self._broadcast_status)
         self.export.error.connect(self._broadcast_error)
         self.export.finished.connect(self._export_finished)
@@ -253,7 +259,8 @@ class MainWindow(QMainWindow):
         self.stream_profile_status=QLabel('Session-only fields. Save/update securely remembers a direct livestream on this computer.'); self.stream_profile_status.setWordWrap(True); self.stream_profile_status.setTextFormat(Qt.TextFormat.PlainText); self.stream_profile_status.setAccessibleName('Protected streaming profile status'); v.addWidget(self.stream_profile_status)
         for field in (self.destination,self.stream_key):field.textChanged.connect(self._stream_fields_changed)
         self.output_mode.currentIndexChanged.connect(self._stream_fields_changed); self.resolution.currentIndexChanged.connect(self._stream_fields_changed); self.bitrate.valueChanged.connect(self._stream_fields_changed)
-        row=QHBoxLayout(); self.choose_recording_button=self._button('Choose recording file',self.choose_recording); row.addWidget(self.choose_recording_button); self.start_output=self._button('Start output',self.start_broadcast,True); row.addWidget(self.start_output); self.stop_output=self._button('Stop output',self.stop_broadcast); self.stop_output.setEnabled(False); row.addWidget(self.stop_output); v.addLayout(row)
+        row=QHBoxLayout(); self.choose_recording_button=self._button('Choose recording file',self.choose_recording); row.addWidget(self.choose_recording_button); self.start_output=self._button('Start output',self.start_broadcast,True); row.addWidget(self.start_output); self.stop_output=self._button('Stop output',self.stop_broadcast); self.stop_output.setEnabled(False); row.addWidget(self.stop_output)
+        self.copy_output_diagnostics_button=self._button('Copy diagnostics',self.copy_output_diagnostics); row.addWidget(self.copy_output_diagnostics_button); v.addLayout(row)
         self.broadcast_label=QLabel('Offline · Program Output is ready for OBS capture.'); self.broadcast_label.setWordWrap(True); self.broadcast_label.setAccessibleName('Output status'); v.addWidget(self.broadcast_label)
         self.broadcast_stats=QLabel(''); self.broadcast_stats.setWordWrap(True); v.addWidget(self.broadcast_stats)
         volume=QHBoxLayout(); volume.addWidget(QLabel('Monitor volume')); self.volume=QSlider(Qt.Orientation.Horizontal); self.volume.setRange(0,100); self.volume.setValue(70); self.volume.setAccessibleName('Local monitoring volume. Streaming audio level is unchanged.'); self.volume.valueChanged.connect(lambda n:self.engine.set_volume(n/100)); volume.addWidget(self.volume); v.addLayout(volume)
@@ -1076,6 +1083,7 @@ class MainWindow(QMainWindow):
 
     def _broadcast_error(self,message):
         self._broadcast_failure=self._redact_broadcast(message)
+        self._output_diagnostic({'event':'error','message':self._broadcast_failure})
         self.broadcast_label.setText('Output failed · '+self._broadcast_failure)
         self._message(self._broadcast_failure)
 
@@ -1084,6 +1092,7 @@ class MainWindow(QMainWindow):
         if name:self.destination.setText(name); self.output_mode.setCurrentIndex(0)
     def start_broadcast(self):
         self._broadcast_failure=''
+        self._output_diagnostic({'event':'ui_start_attempt','mode':'stream' if self.output_mode.currentIndex()==1 else 'record'})
         if self._profile_busy:self._broadcast_error('Wait for the protected profile operation before starting output.'); return
         if self.extract_process.state()!=QProcess.ProcessState.NotRunning:self._broadcast_error('Finish or cancel lyric extraction before starting output.'); return
         mode='stream' if self.output_mode.currentIndex()==1 else 'record'
@@ -1110,10 +1119,26 @@ class MainWindow(QMainWindow):
         for b in [self.extract_button,self.batch_button,self.align_button]:b.setEnabled(True)
         if self._closing:QTimer.singleShot(0,self.close)
     def _broadcast_status(self,message):
+        self._output_diagnostic({'event':'status','message':message})
         if self._broadcast_failure:self.broadcast_label.setText('Output failed · '+self._broadcast_failure)
         else:self.broadcast_label.setText(self._redact_broadcast(message))
+    def _diagnostic_privacy(self):
+        config=getattr(self.export,'_config',None)
+        target=config.target if config else self.destination.text()
+        secrets=(self.stream_key.text(),self.destination.text())+(config.secrets if config else ())
+        return target,secrets
+    def _output_diagnostic(self,event):
+        target,secrets=self._diagnostic_privacy()
+        self.output_diagnostics.append(event,target=target,secrets=secrets)
+    def copy_output_diagnostics(self):
+        target,secrets=self._diagnostic_privacy()
+        QApplication.clipboard().setText(self.output_diagnostics.text(target=target,secrets=secrets))
+        self._message('Output diagnostics copied. Streaming destinations and credentials are omitted.')
     def _broadcast_statistics(self,data):
         self.broadcast_stats.setText(' · '.join(f'{key.replace("_"," ")}: {value}' for key,value in data.items() if key in {'running','elapsed_seconds','video_frames','duplicated_video_frames','replaced_video_inputs','audio_frames','audio_dropped_frames','silence_frames','audio_buffer_seconds','delivery_lag_seconds','reconnects'} and type(value) in (int,float,bool)))
+        if time.monotonic()-self._last_output_diagnostic_stats>=10:
+            self._last_output_diagnostic_stats=time.monotonic()
+            self._output_diagnostic({'event':'statistics',**data})
     def _schedule_save(self):
         if hasattr(self,'save_timer'):self.save_timer.start(600)
     def save_session(self):
