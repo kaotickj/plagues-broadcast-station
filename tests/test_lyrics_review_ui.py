@@ -110,6 +110,32 @@ def test_failed_atomic_save_keeps_edits_and_prior_file(window,tmp_path,pending,m
     assert window.save_lyrics_button.isEnabled() and not window.approve_lyrics_button.isEnabled()
 
 
+@pytest.mark.parametrize('genuine_overlap', [False, True])
+def test_generated_rounding_save_button_route_and_real_overlap_buffer(window,tmp_path,pending,genuine_overlap):
+    from test_lyric_boundary_rounding import generated
+    tracks,target=open_draft(window,tmp_path,pending);track=tracks[0]
+    data=generated();data['source_sha256']=fingerprint(track.path)
+    if genuine_overlap:data['segments'][6]['start']=46.810
+    target.write_text(json.dumps(data));before=target.read_bytes()
+    window._lyrics_ready(track,target,load_lyrics(target))
+    window.lyric_text.item(0,2).setText('雨 — operator correction')
+    window.save_lyrics_button.click()
+    if genuine_overlap:
+        assert 'Line 7 starts at 46.810s before line 6 ends at 46.822s' in window.lyric_save_status.text()
+        assert target.read_bytes()==before and window._lyric_buffers
+        assert window.lyric_text.item(0,2).text()=='雨 — operator correction'
+    else:
+        pending[-1].finish()
+        saved=load_lyrics(target)
+        assert saved.segments[6].start==saved.segments[6].words[0].start==46.822
+        assert saved.segments[0].text=='雨 — operator correction'
+        assert 'Saved · Draft' in window.lyric_save_status.text() and not window._lyric_buffers
+        window._lyrics_ready(track,target,load_lyrics(target))
+        assert window.lyric_text.item(6,0).text()=='46.822'
+        assert window.lyric_text.item(0,2).text()=='雨 — operator correction'
+        assert not is_approved(saved)
+
+
 def test_explicit_approval_persists_exact_revision_and_keeps_qc_findings(window,tmp_path,pending):
     tracks,target=open_draft(window,tmp_path,pending);track=tracks[0]
     initial=load_lyrics(target);window.engine.order.select(0)

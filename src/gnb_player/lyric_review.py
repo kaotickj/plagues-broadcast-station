@@ -12,7 +12,8 @@ import tempfile
 import time
 import uuid
 
-from .lyrics import Cue, LyricsDocument, MAX_LYRIC_BYTES, fingerprint, lyric_write_lock, _review_state_digest, preserve_import_provenance
+from .lyrics import Cue, Word, LyricsDocument, MAX_LYRIC_BYTES, fingerprint, lyric_write_lock, _review_state_digest, preserve_import_provenance
+from .lyric_timing import normalize_rounded_boundaries, validate_line_interval
 
 
 def document_revision(document: LyricsDocument) -> str:
@@ -26,7 +27,7 @@ def _rows(rows, duration, *, allow_empty=False):
     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 0 < duration <= 86400:
         raise ValueError("The recording needs a valid duration before review.")
     result, previous = [], 0.0
-    for row in rows:
+    for number, row in enumerate(rows, 1):
         if not isinstance(row, (list, tuple)) or len(row) != 3:
             raise ValueError("Each lyric row needs start, end and text.")
         start, end, text = row
@@ -36,9 +37,7 @@ def _rows(rows, duration, *, allow_empty=False):
             start, end = float(start), float(end)
         except (TypeError, ValueError) as error:
             raise ValueError("Lyric timestamps must be finite numbers.") from error
-        if (not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start or
-                end > duration or start < previous):
-            raise ValueError("Lyric lines must be ordered, nonoverlapping intervals within the recording.")
+        validate_line_interval(start, end, duration, previous, number)
         if not isinstance(text, str) or not text.strip() or len(text) > 20000:
             raise ValueError("Every lyric row needs nonempty text of at most 20,000 characters. Remove unwanted rows explicitly.")
         result.append((start, end, text))
@@ -132,8 +131,36 @@ def retarget_review(document: LyricsDocument, current_document: LyricsDocument |
 
 
 def edit_document(document: LyricsDocument, rows) -> LyricsDocument:
+    # Work only on copies. A legacy extraction can contain a mixed-precision
+    # boundary; reconcile its word start too, retaining all text/QC metadata.
+    _, base_adjustments = normalize_rounded_boundaries(document.to_dict()['segments'])
+    if base_adjustments:
+        document = deepcopy(document)
+        for adjustment in base_adjustments:
+            cue = document.segments[adjustment['line'] - 1]
+            cue.start = adjustment['start']
+            if cue.words and cue.words[0].start < cue.start:
+                first = cue.words[0]
+                cue.words[0] = Word(first.text, cue.start, first.end, first.metadata)
+    # Validate structure/numbers first without rejecting the narrow discrepancy.
+    rows = list(rows)
+    parsed = []
+    for number, row in enumerate(rows, 1):
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            raise ValueError(f'Line {number}: each lyric row needs start, end and text.')
+        start, end, text = row
+        if isinstance(start, bool) or isinstance(end, bool):
+            raise ValueError(f'Line {number}: lyric timestamps must be finite numbers.')
+        try:
+            parsed.append({'start': float(start), 'end': float(end), 'text': text})
+        except (TypeError, ValueError) as error:
+            raise ValueError(f'Line {number}: lyric timestamps must be finite numbers.') from error
+    normalized_rows, row_adjustments = normalize_rounded_boundaries(parsed)
+    rows = [(row['start'], row['end'], row['text']) for row in normalized_rows]
     rows = _rows(rows, document.duration, allow_empty=True)
     result = invalidate_review(document)
+    if base_adjustments or row_adjustments:
+        result.metadata.setdefault('timing_boundary_adjustments', []).extend(row_adjustments or base_adjustments)
     # Reserve every exact match before assigning changed rows, so deleting a
     # line never transfers its word timing/metadata to the following line.
     assigned, used = {}, set()

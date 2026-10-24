@@ -20,6 +20,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extraction import ExtractionConfig, config_status, media_environment, effective_model_paths, required_model_files
 from lyrics import lyric_write_lock, lyric_target_bytes, lyric_target_revision, MAX_LYRIC_BYTES
+from lyric_timing import normalize_generated_timing
 
 OUTPUT = sys.stdout
 OWN_PROCESS_GROUP = False
@@ -277,6 +278,20 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
                 data.setdefault("warnings", []).append("Independent model review could not complete; check these lyrics before broadcasting.")
                 print("Independent review failed:", type(error).__name__, str(error)[:300], file=sys.stderr, flush=True)
         data.setdefault('recognition_evidence',{})['after_review']=transcript_snapshot(data)
+        # Review's centisecond timestamps can differ from retained CTC
+        # milliseconds. Keep raw evidence and normalize only the final result.
+        try:
+            normalize_generated_timing(data)
+        except ValueError as error:
+            message = str(error) + ' Existing lyrics were kept.'
+            try:
+                diagnostic = save_failure_evidence(Path(config.cache_dir).expanduser(),
+                    data.get('recognition_evidence', {}), fingerprint, message)
+            except Exception as diagnostic_error:
+                print('Failed-extraction diagnostics could not be saved:', type(diagnostic_error).__name__, file=sys.stderr, flush=True)
+            else:
+                message += ' Diagnostics: ' + str(diagnostic)
+            raise ValueError(message) from error
     if source.stat().st_size != before_size or source.stat().st_mtime_ns != before_mtime or source_fingerprint(source) != fingerprint:
         raise ValueError("The recording changed during extraction. Existing lyrics were kept; retry once the copy or edit finishes.")
     if abs(float(data.get("duration", 0)) - duration) > 2:
