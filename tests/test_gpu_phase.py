@@ -54,7 +54,9 @@ class PhaseLeaseTests(unittest.TestCase):
  def test_primary_busy_propagates_without_silent_cpu_whisper(self):
   import numpy as np
   fake_torch=SimpleNamespace(set_num_threads=lambda *a:None,set_num_interop_threads=lambda *a:None)
-  fake_sf=SimpleNamespace(read=lambda *a,**k:(np.zeros(16000),16000))
+  # Exercise lease propagation with usable input; empty audio now fails before
+  # any GPU reservation, as separately covered by the signal preflight tests.
+  fake_sf=SimpleNamespace(read=lambda *a,**k:(.1*np.sin(np.arange(16000)*.1),16000))
   with patch.dict(sys.modules,{'torch':fake_torch,'soundfile':fake_sf}),patch.object(pipeline,'decode'),patch.object(gpu,'enabled',return_value=True),patch.object(gpu,'recognize_windows',side_effect=gpu.GpuCapacityDeferred('busy')),patch.object(pipeline,'transcribe_whisper',side_effect=AssertionError('silent CPU fallback')):
    with self.assertRaises(gpu.GpuCapacityDeferred):pipeline.extract(Path(self.tmp.name)/'song.mp3',Path(self.tmp.name),'large-v3',False,'',lambda *a:None)
 
