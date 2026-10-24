@@ -58,6 +58,7 @@ class ModelSetupDialog(QDialog):
         self.tasks = []
         self.result_config = None
         self.discovery = None
+        self._runtime_manually_selected = False
         self._busy = False
         self._cancelled = False
         self._events = None
@@ -124,6 +125,7 @@ class ModelSetupDialog(QDialog):
         self.runtime.setAccessibleName('Python runtime for lyric models')
         self.runtime.addItem('Download compatible Python for this app' if os.name == 'nt' else 'Choose an installed Python 3.11–3.13', None)
         self.runtime.currentIndexChanged.connect(self.refresh_plan)
+        self.runtime.activated.connect(lambda _: setattr(self, '_runtime_manually_selected', True))
         form.addRow('Model Python', self.runtime)
         body.addLayout(form)
         self.findings = QPlainTextEdit()
@@ -278,7 +280,8 @@ class ModelSetupDialog(QDialog):
         self.runtime.blockSignals(True)
         self.runtime.clear()
         self.runtime.addItem('Download compatible Python for this app' if os.name == 'nt' else 'Choose an installed Python 3.11–3.13', None)
-        selected = first_compatible = first_supported = 0
+        selected = previous_supported = first_compatible = first_supported = 0
+        runtime_details = []
         for runtime in result.runtimes:
             if runtime.version.startswith(('3.11.', '3.12.', '3.13.')):
                 self.runtime.addItem(f'Python {runtime.version} · ' + ('reuse model environment' if runtime.compatible else 'create isolated environment') + ' · ' + runtime.path, runtime.to_dict())
@@ -288,10 +291,17 @@ class ModelSetupDialog(QDialog):
                 if runtime.compatible and not first_compatible:
                     first_compatible = index
                 if runtime.path == previous_runtime:
-                    selected = index
-            descriptions.append(f'Python {runtime.version or "unavailable"}: {runtime.reason} ({runtime.path})')
-        self.runtime.setCurrentIndex(selected or first_compatible or first_supported)
+                    previous_supported = index
+                    if runtime.compatible or self._runtime_manually_selected:
+                        selected = index
+            runtime_details.append(f'Python {runtime.version or "unavailable"}: {runtime.reason} ({runtime.path})')
+        self.runtime.setCurrentIndex(selected or first_compatible or previous_supported or first_supported)
         self.runtime.blockSignals(False)
+        chosen = self.runtime.currentData() or {}
+        if chosen:
+            descriptions.append('Selected lyric runtime: ' + chosen['path'] + (' — compatible existing environment; no package installation needed.' if chosen.get('compatible') else ' — base Python only; setup must create an isolated environment. System Python packages will not be modified.'))
+        descriptions.append('Other scan results are candidate diagnostics, not failures of the selected runtime/models:')
+        descriptions += runtime_details
         descriptions += [f'{model.path}: {model.reason}' for model in result.models if not model.compatible]
         descriptions += result.warnings
         if result.cancelled:
@@ -468,7 +478,12 @@ class ModelSetupDialog(QDialog):
             values = result.get('settings', result.get('config', result))
             if not isinstance(values, dict) or any(not isinstance(values.get(key), str) or not values[key] for key in ('python_path', *COMPONENTS)):
                 raise ValueError('Setup returned incomplete model locations; previous settings were kept.')
-            config = ExtractionConfig.from_dict({**self.config.to_dict(), **values, **self._ollama_values()})
+            # Installer results own model locations, never station processing
+            # preferences. Ignore legacy workers that returned use_gpu=False
+            # just because they created CPU Torch dependencies.
+            installed_keys = {'python_path', 'model_root', 'torch_home', 'engine', *COMPONENTS}
+            installed = {key: value for key, value in values.items() if key in installed_keys}
+            config = ExtractionConfig.from_dict({**self.config.to_dict(), **installed, **self._ollama_values()})
             config.cache_dir = str(self.data_dir / 'lyrics-cache')
             self._apply(config)
             self.progress.setValue(100)

@@ -1,2 +1,2 @@
 """Plague's Broadcast Station."""
-__version__ = "0.2.4rc9"
+__version__ = "0.2.4rc10"

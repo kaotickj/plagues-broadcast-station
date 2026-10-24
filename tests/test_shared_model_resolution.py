@@ -42,7 +42,7 @@ def install_shared(paths):
 
 def test_shared_install_is_resolved_without_mutating_gpu_switch_cache_or_blank_overrides(locations,monkeypatch):
     base,shared=locations;install_shared(shared)
-    original=models.discover_config();original.cache_dir=str(base/'station-one-private-cache');before=original.to_dict()
+    original=models.discover_config();original.use_gpu=False;original.cache_dir=str(base/'station-one-private-cache');before=original.to_dict()
     resolved,report=models.resolve_existing_models(original)
     assert original.to_dict()==before
     assert resolved.model_root==str(shared['model_root']) and resolved.torch_home==str(shared['torch_home'])

@@ -335,7 +335,10 @@ def discover_config() -> ExtractionConfig:
         ollama_model=os.environ.get("GNB_PLAYER_OLLAMA_MODEL", ""),
         recognition_language=os.environ.get("GNB_PLAYER_RECOGNITION_LANGUAGE", "en"),
         recognition_prompt=os.environ.get("GNB_PLAYER_RECOGNITION_PROMPT", ""),
-        use_gpu=bool(gpu_python or vulkan),
+        # Try existing supported acceleration when no preference has been saved.
+        # Discovery resolves shared paths below; their absence still falls back
+        # to CPU. from_dict preserves every explicit saved false choice.
+        use_gpu=True,
     )
     environment_paths = {'python_path': 'GNB_PLAYER_PYTHON', 'model_root': 'GNB_PLAYER_MODELS',
                          'torch_home': 'GNB_PLAYER_TORCH_HOME', 'gpu_python_path': 'GNB_PLAYER_GPU_PYTHON',
@@ -362,10 +365,24 @@ def config_status(config: ExtractionConfig) -> dict:
     requirements = required_model_files(config)
     missing = [str(path) for path in requirements if not _readable(path)]
     python_exists = _executable_location(config.python_path) is not None
+    vulkan_ready = bool(config.vulkan_binary and _executable(Path(config.vulkan_binary).expanduser())
+                        and config.vulkan_model and _readable(Path(config.vulkan_model).expanduser()))
+    helper_ready = bool(config.gpu_python_path and _executable(Path(config.gpu_python_path).expanduser()))
+    if not config.use_gpu:
+        recognition = 'CPU (GPU processing is off for this station)'
+    elif config.engine != 'large-v3':
+        recognition = 'CPU (' + config.engine + '; the Vulkan route requires large-v3)'
+    else:
+        recognition = 'Vulkan GPU when available' if vulkan_ready else 'CPU fallback (Vulkan executable/model unavailable)'
+    plan = {'recognition': recognition,
+            'alignment': ('ROCm GPU when available; CPU fallback' if config.use_gpu and vulkan_ready and helper_ready else 'CPU'),
+            'separation': 'CPU' if config.separate_vocals else 'Disabled (original mix)',
+            'review': 'CPU, independent medium.en model' if config.auto_review else 'Disabled'}
     return {"ready": python_exists and not missing and bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe")),
             "python_available": python_exists, "missing_models": missing,
             "ffmpeg_available": bool(shutil.which("ffmpeg")), "ffprobe_available": bool(shutil.which("ffprobe")),
-            "gpu_configured": bool(config.use_gpu and config.vulkan_binary and _executable(Path(config.vulkan_binary).expanduser()) and config.vulkan_model and _readable(Path(config.vulkan_model).expanduser())),
+            "gpu_configured": bool(config.use_gpu and vulkan_ready), "processing_plan": plan,
+            "processing_note": "Configured routes only: GPU capacity, runtime compatibility and actual execution are checked during each job. Saved job diagnostics report the resulting route; cached recognition runs no new GPU inference. Supplied lyric-sheet alignment uses CPU.",
             "resolved_values": resolution['resolved_values'], "effective_model_paths": resolution['effective_model_paths'],
             "path_resolution": resolution, "resolution_notes": resolution['notes'],
             "note": "The player works without models. Extraction requires the separate local model runtime; no model is downloaded automatically. File discovery does not validate model formats or runtime dependencies."}

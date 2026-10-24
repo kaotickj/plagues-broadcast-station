@@ -29,7 +29,7 @@ class ExtractionTests(unittest.TestCase):
                 self.assertEqual(config.gpu_lock, "")
                 self.assertEqual(config.gpu_python_path, "")
                 self.assertEqual(config.vulkan_binary, "")
-                self.assertFalse(config.use_gpu)
+                self.assertTrue(config.use_gpu)
             values = {"GNB_PLAYER_PYTHON": str(base / "runtime/python"),
                       "GNB_PLAYER_MODELS": str(base / "configured-models"),
                       "GNB_PLAYER_TORCH_HOME": str(base / "configured-torch"),

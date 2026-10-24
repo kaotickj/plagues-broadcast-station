@@ -115,3 +115,24 @@ def test_escape_uses_close_cancellation_path(wizard,monkeypatch):
     monkeypatch.setattr(wizard,'close',lambda:closed.append(True))
     wizard.reject()
     assert closed==[True]
+
+
+def test_automatic_selection_prefers_compatible_runtime_over_base_python(wizard,tmp_path):
+    wizard.config.python_path='/system/base-python'
+    result=ready_discovery(tmp_path)
+    result.runtimes.insert(0,PythonRuntime('/system/base-python','3.13.5',{},False,'missing model packages'))
+    wizard._found(result)
+    assert wizard._plan().runtime_python==sys.executable
+    assert 'Selected lyric runtime: '+sys.executable in wizard.findings.toPlainText()
+    assert 'candidate diagnostics' in wizard.findings.toPlainText()
+
+
+def test_deliberate_base_python_selection_survives_rescan(wizard,tmp_path):
+    result=ready_discovery(tmp_path)
+    result.runtimes.append(PythonRuntime('/system/base-python','3.13.5',{},False,'missing model packages'))
+    wizard._found(result)
+    wizard.runtime.setCurrentIndex(2)
+    wizard.runtime.activated.emit(2)
+    wizard._found(result)
+    assert wizard._plan().base_python=='/system/base-python'
+    assert wizard._plan().runtime_python==''

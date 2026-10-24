@@ -456,6 +456,34 @@ def probe_python(path: str | Path, *, timeout: float = 5) -> PythonRuntime:
     return result
 
 
+def _python_invocation_path(candidate: str | Path, *, version_dir: Path | None = None) -> Path | None:
+    """Validate the executable, retaining the path that selects its venv.
+
+    Venv ``bin/python`` is normally a symlink to the system interpreter. Its
+    resolved target is useful for validation, never for invocation or deduping.
+    Managed manifests must place the entry point and its resolved parent within
+    their own completed version; a directory link cannot escape that boundary.
+    """
+    try:
+        path = Path(os.path.abspath(Path(candidate).expanduser()))
+        if _network_path(path) or "windowsapps" in str(path).lower():
+            return None
+        parent = path.parent.resolve(strict=True)
+        if version_dir is not None:
+            lexical_version = Path(os.path.abspath(version_dir.expanduser()))
+            resolved_version = lexical_version.resolve(strict=True)
+            if (not _contained(path, [lexical_version, resolved_version]) or
+                    not parent.is_relative_to(resolved_version)):
+                return None
+        target = path.resolve(strict=True)
+        if (_network_path(parent) or _network_path(target) or
+                not target.is_file() or not os.access(path, os.X_OK)):
+            return None
+        return path
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return None
+
+
 def discover_python_paths(*, app_data: Path | None = None, settings=None,
                           extra_paths: Iterable[str | Path] = ()) -> list[str]:
     base = Path(app_data) if app_data else default_data_dir()
@@ -468,23 +496,29 @@ def discover_python_paths(*, app_data: Path | None = None, settings=None,
     versions = base / "model-setup/versions"
     if versions.is_dir() and not _network_path(versions):
         try:
+            # The managed namespace itself may not redirect outside app data.
+            resolved_versions = versions.resolve(strict=True)
+            resolved_base = base.resolve(strict=True)
+            if (_network_path(resolved_versions) or _network_path(resolved_base) or
+                    not resolved_versions.is_relative_to(resolved_base)):
+                raise ValueError("Managed runtime directory escapes app data.")
             with os.scandir(versions) as entries:
                 for index, entry in enumerate(entries):
                     if index >= 128:
                         break
                     if not entry.is_dir(follow_symlinks=False) or entry.is_symlink():
                         continue
-                    version_dir = Path(entry.path).resolve()
+                    version_dir = Path(entry.path)
                     try:
-                        manifest = _small_json(version_dir / "installation.complete.json", [version_dir])
+                        manifest = _small_json(version_dir / "installation.complete.json", [version_dir.resolve(strict=True)])
                         chosen = manifest.get("settings", {}).get("python_path", "")
                         if isinstance(chosen, str) and chosen:
-                            runtime = Path(chosen).resolve(strict=True)
-                            if runtime.is_relative_to(version_dir):
+                            runtime = _python_invocation_path(chosen, version_dir=version_dir)
+                            if runtime is not None:
                                 candidates.append(runtime)
                     except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
                         continue
-        except OSError:
+        except (OSError, ValueError, RuntimeError):
             pass
     if not getattr(sys, "frozen", False):
         candidates.append(sys.executable)
@@ -506,17 +540,12 @@ def discover_python_paths(*, app_data: Path | None = None, settings=None,
     result = []
     seen = set()
     for candidate in candidates:
-        path = Path(candidate).expanduser()
-        if _network_path(path) or "windowsapps" in str(path).lower():
-            continue
-        try:
-            path = path.resolve(strict=True)
+        path = _python_invocation_path(candidate)
+        if path is not None:
             key = os.path.normcase(str(path))
-            if path.is_file() and key not in seen:
+            if key not in seen:
                 seen.add(key)
                 result.append(str(path))
-        except (OSError, RuntimeError):
-            continue
     return result[:12]
 
 

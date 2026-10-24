@@ -269,6 +269,8 @@ class MainWindow(QMainWindow):
     def _models_tab(self):
         page=QWidget(); v=QVBoxLayout(page); form=QFormLayout(); self.model_fields={}
         v.addWidget(self._button('Set up / find models',self.open_model_setup,True))
+        self.gpu=QCheckBox('Use GPU when available; wait while another job uses it'); self.gpu.setChecked(self.extract_config.use_gpu); self.gpu.setAccessibleName('Use GPU when available'); v.addWidget(self.gpu)
+        self.processing_status=QLabel(); self.processing_status.setWordWrap(True); self.processing_status.setTextFormat(Qt.TextFormat.PlainText); self.processing_status.setAccessibleName('Configured processing backends'); v.addWidget(self.processing_status)
         self.separate_vocals=QCheckBox('Separate vocals before recognition')
         self.separate_vocals.setAccessibleName('Separate vocals before recognition')
         self.separate_vocals.setChecked(self.extract_config.separate_vocals)
@@ -287,7 +289,7 @@ class MainWindow(QMainWindow):
             if key in self.model_fields:self.model_fields[key].textEdited.connect(lambda _,key=key:self._edited_model_paths.add(key))
         self.model_fields['recognition_prompt'].setToolTip('Optional context can bias recognition. Leave empty to avoid introducing words; recording filenames are never used as prompts.')
         self.model_fields['recognition_language'].setToolTip('Use en for English, auto for language detection, or a supported language code. English-only models retain English.')
-        v.addLayout(form); self.gpu=QCheckBox('Use GPU when available; wait while another job uses it'); self.gpu.setChecked(self.extract_config.use_gpu); v.addWidget(self.gpu)
+        v.addLayout(form)
         v.addWidget(self._button('Save model settings',self.save_model_settings)); self.model_status=QLabel(''); self.model_status.setWordWrap(True); v.addWidget(self.model_status)
         note=QLabel('Playback does not require AI models. Extraction uses a separate local Python runtime so heavy work stays outside the player. Configure your installed runtime and models here; local settings are restored on later launches.'); note.setWordWrap(True); note.setObjectName('muted'); v.addWidget(note); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Lyric models'); self.update_model_status()
 
@@ -1004,11 +1006,15 @@ class MainWindow(QMainWindow):
         if existing and existing.isVisible():existing.raise_();existing.activateWindow();return
         if existing:existing.deleteLater()
         from .model_setup_dialog import ModelSetupDialog
-        self.model_setup_dialog=ModelSetupDialog(self.extract_config,self.data_dir,self)
+        current=self.extract_config.to_dict()
+        current.update(use_gpu=self.gpu.isChecked(),separate_vocals=self.separate_vocals.isChecked(),reuse_recognition=self.reuse_recognition.isChecked())
+        self.model_setup_dialog=ModelSetupDialog(ExtractionConfig.from_dict(current),self.data_dir,self)
         self.model_setup_dialog.configured.connect(self._model_setup_applied)
         self.model_setup_dialog.show()
     def _model_setup_applied(self,config):
         values=config.to_dict();explicit=set(values.get('explicit_paths',[]))
+        # Setup can take time; keep the operator's latest visible preferences.
+        values.update(use_gpu=self.gpu.isChecked(),separate_vocals=self.separate_vocals.isChecked(),reuse_recognition=self.reuse_recognition.isChecked())
         for key in MODEL_PATH_FIELDS:
             if values.get(key) and values.get(key)!=getattr(self.extract_config,key):explicit.add(key)
         values['explicit_paths']=sorted(explicit)
@@ -1017,6 +1023,8 @@ class MainWindow(QMainWindow):
         if self.save_session():self._message('Model settings saved. Selected recognizer: '+self.extract_config.engine)
     def update_model_status(self):
         status=config_status(self.extract_config)
+        self.processing_status.setText('Saved processing choices · '+ ' · '.join(name.capitalize()+': '+value for name,value in status.get('processing_plan',{}).items()))
+        self.processing_status.setToolTip(status.get('processing_note',''))
         report=self._model_resolution_report
         notes=[self._model_config_warning] if self._model_config_warning else []
         notes.extend(report.get('notes',[]))
