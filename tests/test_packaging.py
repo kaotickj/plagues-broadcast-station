@@ -54,6 +54,18 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(main(['--model-install-worker','--result-file','result.json']),74)
         self.assertEqual(received,[['--result-file','result.json']])
 
+    def test_external_worker_import_does_not_write_into_immutable_bundle(self):
+        with tempfile.TemporaryDirectory(prefix='isolated worker bundle ') as folder:
+            bundle=Path(folder)
+            for name in ['extract_worker.py','extraction.py','lyrics.py','lyric_timing.py','model_discovery.py']:
+                shutil.copy2(ROOT/'src/gnb_player'/name,bundle/name)
+            # Match the actual external-worker entry path: execute the script,
+            # rather than importing the entry module (which Python compiles
+            # before its own code can set dont_write_bytecode).
+            subprocess.run([sys.executable,str(bundle/'extract_worker.py'),'--help'],check=True,capture_output=True,text=True,timeout=15)
+            self.assertFalse(list(bundle.rglob('*.pyc')))
+            self.assertFalse(list(bundle.rglob('__pycache__')))
+
     def test_source_installer_rejects_downloads_without_explicit_install_action(self):
         import json
         with tempfile.TemporaryDirectory(prefix='station no downloads ') as temporary:

@@ -17,6 +17,7 @@ import tempfile
 import time
 import uuid
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extraction import ExtractionConfig, config_status, media_environment, effective_model_paths, required_model_files
 from lyrics import lyric_write_lock, lyric_target_bytes, lyric_target_revision, MAX_LYRIC_BYTES
