@@ -212,6 +212,29 @@ def _atomic_result_unlocked(target: Path, data: dict, original: bytes | None) ->
         Path(temporary).unlink(missing_ok=True)
 
 
+def save_failure_evidence(cache: Path, evidence: dict, fingerprint: str, message: str) -> Path:
+    """Keep failed decoder evidence separate from all editable lyric revisions."""
+    payload = json.dumps({'version': 'extraction-failure-1', 'source_sha256': fingerprint,
+                          'created_at': int(time.time()), 'status': 'failed',
+                          'message': message, 'recognition_evidence': evidence},
+                         ensure_ascii=False, allow_nan=False).encode('utf-8')
+    if len(payload) > MAX_LYRIC_BYTES:
+        raise ValueError('The failed-extraction diagnostic exceeds the private file limit.')
+    directory = cache / 'failures'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = directory / (fingerprint + '-' + uuid.uuid4().hex + '.json')
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, prefix='.failure-', delete=False) as stream:
+            temporary = Path(stream.name)
+            os.chmod(temporary, 0o600)
+            stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+        temporary.replace(target)
+        return target
+    finally:
+        if temporary is not None: temporary.unlink(missing_ok=True)
+
+
 def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "") -> dict:
     source = source.expanduser().resolve(strict=True)
     output = output.expanduser().absolute()
@@ -233,7 +256,19 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
     reset_gpu_timings()
     with tempfile.TemporaryDirectory(prefix="gnb-player-lyrics-") as folder:
         work = Path(folder)
-        data = extract(source, work, config.engine, config.separate_vocals, reference, progress, title=source.stem)
+        try:
+            data = extract(source, work, config.engine, config.separate_vocals, reference, progress, title=source.stem)
+        except Exception as error:
+            evidence = getattr(error, 'recognition_evidence', None)
+            if isinstance(evidence, dict) and evidence:
+                try:
+                    diagnostic = save_failure_evidence(Path(config.cache_dir).expanduser(), evidence, fingerprint, str(error))
+                except Exception as diagnostic_error:
+                    print('Failed-extraction diagnostics could not be saved:', type(diagnostic_error).__name__, file=sys.stderr, flush=True)
+                else:
+                    if isinstance(error, ValueError):
+                        raise ValueError(str(error)+' Existing lyrics were kept. Diagnostics: '+str(diagnostic)) from error
+            raise
         data.setdefault('recognition_evidence',{})['before_review']=transcript_snapshot(data)
         if config.auto_review and assess(data)["status"] != "pass":
             try:

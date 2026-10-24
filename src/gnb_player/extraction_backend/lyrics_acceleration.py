@@ -148,6 +148,55 @@ def parse_words(data,offset=0):
         words.append({'text':text,'start':round(a,3),'end':round(b,3),'score':sum(scores)/len(scores)})
     return words
 
+class AlignmentRejected(ValueError):
+    """Measured CTC output must not replace a recording's saved lyric draft."""
+
+
+def validate_alignment(words, aligned, duration):
+    """Validate CTC evidence before replacing any recognizer word timing.
+
+    This checks plausibility, not whether the recognized words were sung. A
+    long instrumental pause between words is allowed. Words up to 12 seconds
+    are allowed here (the stricter publication checks still hold words over
+    eight seconds for review). Broadly weak CTC confidence must not borrow the
+    recognizer's separate confidence to appear successful.
+    """
+    def reject(reason):
+        raise AlignmentRejected('Audio realignment was rejected: '+reason+
+                                '. Check the words against the recording or align a known lyric sheet. '
+                                'No replacement lyrics were saved.')
+
+    def finite(value):
+        return isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value)
+
+    if not finite(duration) or duration<=0:
+        reject('the audio duration is invalid')
+    if not isinstance(aligned,(list,tuple)) or not words or len(aligned)!=len(words):
+        reject('the word coverage changed')
+    previous_end=0
+    scores=[]
+    for index,(old,new) in enumerate(zip(words,aligned)):
+        label='word '+str(index+1)
+        if not isinstance(new,dict) or new.get('text')!=old.get('text'):
+            reject('the text changed at '+label)
+        start,end=new.get('start'),new.get('end')
+        if not finite(start) or not finite(end):
+            reject('the timing is missing or nonfinite at '+label)
+        if start<0 or end>duration or end<=start:
+            reject('the timing is empty or outside the recording at '+label)
+        if start<previous_end-.05:
+            reject('the timing moves backward at '+label)
+        if end-start>12:
+            reject('a word was stretched over more than 12 seconds at '+label)
+        score=new.get('score')
+        if not finite(score) or not 0<=score<=1:
+            reject('CTC confidence is missing or invalid at '+label)
+        scores.append(score)
+        previous_end=end
+    if sum(scores)/len(scores)<.15 or sum(score<.10 for score in scores)>len(scores)/2:
+        reject('the CTC alignment confidence is broadly too low')
+
+
 def realign(audio,sr,words,work,progress,return_backend=False):
     import soundfile as sf
     source=work/'align-audio.wav';target=work/'aligned-words.json'
@@ -163,11 +212,10 @@ def realign(audio,sr,words,work,progress,return_backend=False):
     if aligned is None:
         from lyrics_pipeline import align_reference
         aligned=align_reference(audio,sr,[' '.join(w['text'] for w in words)],progress)
-    if len(aligned)!=len(words):raise ValueError('Alignment text coverage changed')
+    validate_alignment(words,aligned,len(audio)/sr)
     result=[]
     for old,new in zip(words,aligned):
-        if old['text']!=new['text']:raise ValueError('Alignment text changed')
-        result.append({**old,'start':new['start'],'end':new['end'],'alignment_score':new.get('score',0)})
+        result.append({**old,'start':new['start'],'end':new['end'],'alignment_score':new['score']})
     return (result,backend) if return_backend else result
 
 def recognize_windows(audio,sr,windows,work,progress,evidence=None,independent=False):

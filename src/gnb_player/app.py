@@ -877,7 +877,7 @@ class MainWindow(QMainWindow):
         self._next_extraction()
     def _next_extraction(self):
         if self.extract_process.state()!=QProcess.ProcessState.NotRunning or not self._extract_queue:return
-        track,text=self._extract_queue.pop(0); self._extract_current=track; self._process_bytes=b''; self._extract_log=''
+        track,text=self._extract_queue.pop(0); self._extract_current=track; self._process_bytes=b''; self._extract_log=''; self._extract_failure=''
         try:
             target=cached_lyrics_path(track.path,Path(self.extract_config.cache_dir)); args=build_command(track.path,target,self.extract_config,text)
             self._extract_context={'track':track,'target':target}
@@ -922,7 +922,9 @@ class MainWindow(QMainWindow):
                     if document.human_review.get('status')=='approved':raise ValueError('A preparation result unexpectedly contained an approval; reopen the saved draft for review.')
                     self._lyrics_ready(self._extract_current,target,document); self.extract_progress.setValue(100)
                 except Exception as error:self._message(str(error))
-            elif event['type']=='error':self._message(str(event.get('message','Lyric extraction failed.')))
+            elif event['type']=='error':
+                self._extract_failure=str(event.get('message','Lyric extraction failed.'))
+                self._message(self._extract_failure)
     def _extract_stderr(self):self._extract_log=(self._extract_log+bytes(self.extract_process.readAllStandardError()).decode(errors='replace'))[-4000:]
     def _process_error(self,error):
         self._message(self.extract_process.errorString())
@@ -930,10 +932,13 @@ class MainWindow(QMainWindow):
             self._extract_queue.clear(); self._extract_current=None; self._extract_context=None; self.preparation_progress.hide(); self.cancel_extract.setEnabled(False); self.lyric_status.setText('The lyric runtime could not start. Check its Python path in Lyric models.'); self._update_review_controls()
     def _extract_finished(self,code,status):
         self._extract_output(); self.cancel_extract.setEnabled(False)
-        if code and not self._closing:self.lyric_status.setText('Extraction stopped or failed. Existing lyrics were preserved. '+self._extract_log[-250:])
         completed=self._extract_current; self._extract_current=None; self._extract_context=None
         if not self._extract_queue:self.preparation_progress.hide()
         if completed:self._display_relevant_document(completed,self.documents.get(str(completed.path))); self._refresh_lyric_label(completed)
+        if code and not self._closing:
+            failure=getattr(self,'_extract_failure','')
+            prefix='Extraction failed.' if failure else 'Extraction stopped or failed.'
+            self.lyric_status.setText(prefix+' Existing lyrics were preserved. '+(failure or self._extract_log[-250:]))
         self._update_review_controls()
         if not self._closing:QTimer.singleShot(300,self._next_extraction)
     def cancel_extraction(self):

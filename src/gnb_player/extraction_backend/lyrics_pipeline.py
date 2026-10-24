@@ -10,12 +10,14 @@ import unicodedata
 from copy import deepcopy
 try:
     from .lyrics_recognition import recognition_policy, qwen_language, segment_evidence, recognition_suspect
+    from .lyrics_signal import measure, limited_signal, inspect_input, require_usable_recognition
 except ImportError:
     from lyrics_recognition import recognition_policy, qwen_language, segment_evidence, recognition_suspect
+    from lyrics_signal import measure, limited_signal, inspect_input, require_usable_recognition
 
 MODELS = Path(os.environ.get('GNB_LYRICS_MODEL_ROOT', 'models'))
 ENGINES = ('large-v3', 'medium.en', 'qwen3-asr-1.7b', 'qwen3-asr-0.6b', 'small.en')
-VERSION = 'singing-4'
+VERSION = 'singing-5'
 
 
 def model_path(engine, *, review=False):
@@ -336,8 +338,8 @@ def make_cues(words, duration, preserve_lines=False):
 def cue(words):
     return {'start':words[0]['start'], 'end':max(w['end'] for w in words),
             'text':' '.join(w['text'] for w in words),
-            'words':[{k:w[k] for k in ('text','start','end','score','uncertain') if k in w} for w in words],
-            'needs_review':any(w['end']<=w['start'] or w.get('score',1)<.15 or w.get('uncertain',False) for w in words)}
+            'words':[{k:w[k] for k in ('text','start','end','score','alignment_score','uncertain') if k in w} for w in words],
+            'needs_review':any(w['end']<=w['start'] or w.get('score',1)<.15 or w.get('alignment_score',1)<.15 or w.get('uncertain',False) for w in words)}
 
 
 def alignment_incomplete(words, text):
@@ -393,13 +395,23 @@ def transcribe_whisper(audio, engine, progress, title='', evidence=None):
 
 
 def extract(source, work, engine, separate, reference, progress, title=''):
+    evidence = {'version':'raw-recognition-1', 'primary':{}}
+    try:
+        return _extract(source, work, engine, separate, reference, progress, title, evidence)
+    except Exception as error:
+        # The external worker saves this separately on failure, never over the
+        # selected recording's saved lyric revision.
+        error.recognition_evidence = deepcopy(evidence)
+        raise
+
+
+def _extract(source, work, engine, separate, reference, progress, title, recognition_evidence):
     import soundfile as sf
     import torch
     torch.set_num_threads(int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')))
     try:torch.set_num_interop_threads(1)
     except RuntimeError:pass
     warnings = []
-    recognition_evidence = {'version':'raw-recognition-1', 'primary':{}}
     gpu_used=False;alignment_compute=None;separation_compute=None
     from lyrics_cache import restore,store
     processing = source;wav = work/'recognition.wav'
@@ -414,6 +426,19 @@ def extract(source, work, engine, separate, reference, progress, title=''):
         if separate:store(source,wav)
     audio, sr = sf.read(wav,dtype='float32')
     duration = len(audio)/sr
+    input_metrics = measure(audio, sr)
+    original_metrics = None
+    if separate and limited_signal(input_metrics):
+        original = work/'original-signal-check.wav'
+        decode(source, original)
+        original_audio, original_sr = sf.read(original, dtype='float32')
+        original_metrics = measure(original_audio, original_sr)
+        del original_audio
+    signal = inspect_input(audio, sr, separated=bool(separate), source=original_metrics)
+    recognition_evidence['signal'] = signal
+    if signal['effectively_empty']:
+        raise ValueError('The recognition audio is effectively silent. Check the recording, try with '
+                         'Separate vocals disabled, or align a known lyric sheet. No replacement lyrics were saved.')
     if reference:
         words = align_reference(audio,sr,reference_lines(reference),progress)
         cues, flags = make_cues(words,duration,preserve_lines=True)
@@ -433,7 +458,7 @@ def extract(source, work, engine, separate, reference, progress, title=''):
         cues, flags = make_cues(words,duration)
         warnings.extend(flags)
     else:
-        from lyrics_acceleration import enabled,recognize_windows,realign,GpuCapacityDeferred
+        from lyrics_acceleration import enabled,recognize_windows,realign,GpuCapacityDeferred,AlignmentRejected
         if engine=='large-v3' and enabled():
             try:
                 words=recognize_windows(audio,sr,[('full',0,duration)],work,progress,evidence=recognition_evidence['primary'])['full']
@@ -445,6 +470,7 @@ def extract(source, work, engine, separate, reference, progress, title=''):
         if not gpu_used:cues, flags = transcribe_whisper(audio,engine,progress,title,evidence=recognition_evidence['primary'])
         method='whisper-vulkan-dtw' if gpu_used else 'whisper-word-timestamps'
         recognition_evidence['pre_alignment'] = deepcopy(cues)
+        require_usable_recognition(cues, duration, signal)
         try:
             detected=recognition_evidence['primary'].get('language','en')
             if detected not in {'en', 'English', 'english'}:
@@ -454,8 +480,11 @@ def extract(source, work, engine, separate, reference, progress, title=''):
             cues,flags=make_cues(words,duration);method='wav2vec2-ctc-recognized-text'
         except GpuCapacityDeferred:
             raise
+        except AlignmentRejected as error:
+            recognition_evidence['alignment'] = {'status':'rejected', 'reason':str(error)}
+            raise
         except Exception as error:
-            warnings.append('Recognition word timing was retained because audio realignment could not complete.')
+            warnings.append('Recognition word timing was retained because audio realignment was rejected or could not complete: '+str(error)[:300])
             print('Audio alignment fallback:',type(error).__name__,str(error)[-500:],flush=True)
         warnings.extend(flags)
     for before, after in zip(cues,cues[1:]):
