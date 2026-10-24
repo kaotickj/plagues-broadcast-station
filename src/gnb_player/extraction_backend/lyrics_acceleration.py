@@ -1,6 +1,6 @@
 """Optional local Radeon acceleration; CPU recognizers remain installed."""
 from pathlib import Path
-import json,os,subprocess,math,re
+import json,os,subprocess,math,re,hashlib
 import threading,time
 from copy import deepcopy
 try:
@@ -220,6 +220,12 @@ def realign(audio,sr,words,work,progress,return_backend=False):
 
 def recognize_windows(audio,sr,windows,work,progress,evidence=None,independent=False):
     import soundfile as sf
+    try:
+        from . import lyrics_cache as cache
+        from .lyrics_identity import recognizer_identity
+    except ImportError:
+        import lyrics_cache as cache
+        from lyrics_identity import recognizer_identity
     if not VULKAN or not VULKAN.is_file() or not GGML or not GGML.is_file():raise RuntimeError('Configure the Vulkan recognizer and model paths before using GPU recognition.')
     result={}
     policy=recognition_policy('large-v3',independent=independent)
@@ -230,13 +236,37 @@ def recognize_windows(audio,sr,windows,work,progress,evidence=None,independent=F
         args=[str(VULKAN),'-m',str(GGML),'-f',str(clip),'-t','4','-bs','3','-bo','3','-l',policy['language'],'-mc','0','-ojf','-of',str(output),'-ml','1','-sow','-dtw','large.v3','-nfa']
         if policy['prompt']:args+=['--prompt',policy['prompt']]
         try:
-            with gpu_phase(progress,'reviewing' if len(windows)>1 else 'transcribing'):
-                p=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=max(120,min(900,int((end-start)*2+60))))
-            if p.returncode:raise RuntimeError('Vulkan recognition failed: '+p.stderr.decode(errors='replace')[-350:])
-            raw=json.loads(output.with_suffix('.json').read_text())
+            cache_path=None;context=None;raw=None;identity=None
+            fresh=os.environ.get('GNB_LYRICS_FRESH_RECOGNITION')=='1'
+            if os.environ.get('GNB_LYRICS_CACHE_DIR'):
+                try:
+                    identity=recognizer_identity(GGML,VULKAN)
+                    context={'schema':'vulkan-decoder-1','recognizer':identity,'policy':policy,
+                             'duration':end-start,'start':start,'end':end,'sample_rate':sr,
+                             'decoder':{'threads':4,'beam':3,'best_of':3,'max_context':0,
+                                        'word_timestamps':True,'dtw':'large.v3','flash_attention':False}}
+                    with clip.open('rb') as stream:pcm_sha=hashlib.file_digest(stream,'sha256').hexdigest()
+                    cache_path=cache.primary_path(pcm_sha,context,policy,start,end)
+                    if not fresh:raw=cache.read_primary(cache_path,context)
+                except Exception as error:
+                    cache_path=None;context=None;identity=None
+                    if evidence is not None:evidence['cache_disabled_reason']='Identity/cache unavailable ('+type(error).__name__+').'
+            cached=raw is not None
+            if cached:
+                progress('reviewing' if independent else 'transcribing',(index+1)/len(windows),
+                         'Reusing matching recognition evidence; timing and review checks still apply.')
+            else:
+                with gpu_phase(progress,'reviewing' if len(windows)>1 else 'transcribing'):
+                    p=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=max(120,min(900,int((end-start)*2+60))))
+                if p.returncode:raise RuntimeError('Vulkan recognition failed: '+p.stderr.decode(errors='replace')[-350:])
+                raw=json.loads(output.with_suffix('.json').read_text())
+                if identity is not None:
+                    if recognizer_identity(GGML,VULKAN)!=identity:
+                        raise RuntimeError('Recognizer model/runtime changed during recognition; cached evidence was not saved.')
+                    cache.write_primary(cache_path,raw,context)
             result[key]=parse_words(raw,start)
             if evidence is not None:
-                evidence['windows'].append({'key':key,'start':start,'end':end,'raw':deepcopy(raw)})
+                evidence['windows'].append({'key':key,'start':start,'end':end,'raw':deepcopy(raw),'cached':cached})
                 evidence['language']=(raw.get('result') or {}).get('language',policy['language'])
         finally:
             clip.unlink(missing_ok=True);output.with_suffix('.json').unlink(missing_ok=True)

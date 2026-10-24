@@ -53,6 +53,7 @@ class ExtractionConfig:
     wait_for_gpu: bool = True
     gpu_wait_seconds: int = 900
     separate_vocals: bool = True
+    reuse_recognition: bool = True
     auto_review: bool = True
     cpu_threads: int = 2
     engine: str = "large-v3"
@@ -78,7 +79,7 @@ class ExtractionConfig:
             value = getattr(config, name)
             if not isinstance(value, str) or len(value) > 4096 or "\x00" in value:
                 raise ValueError("Invalid extraction path or model setting.")
-        for name in ("use_gpu", "wait_for_gpu", "separate_vocals", "auto_review"):
+        for name in ("use_gpu", "wait_for_gpu", "separate_vocals", "reuse_recognition", "auto_review"):
             if not isinstance(getattr(config, name), bool):
                 raise ValueError("Extraction switches must be true or false.")
         if isinstance(config.cpu_threads, bool) or not isinstance(config.cpu_threads, int) or not 1 <= config.cpu_threads <= 8:

@@ -147,6 +147,7 @@ def recognize(audio,sr,windows,engine,progress,evidence=None):
                 raise
             except Exception as error:print('GPU review fallback:',type(error).__name__,str(error)[:200],flush=True)
     from faster_whisper import WhisperModel
+    from pathlib import Path
     from lyrics_pipeline import model_path,release_memory
     model=None
     selected_model_path=str(model_path(engine,review=engine=='medium.en'))
@@ -157,11 +158,33 @@ def recognize(audio,sr,windows,engine,progress,evidence=None):
     policy=recognition_policy(engine,independent=True)
     if evidence is not None:evidence.update(backend='faster-whisper',engine=engine,settings=policy,windows=[])
     model_factory=lambda:WhisperModel(selected_model_path,device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
-    result={}
+    # Review evidence is reusable only for these actual model/runtime bytes.
+    # A same-path model repair must never inherit the previous model's words.
+    cache_config=None
+    try:
+        try:
+            from .lyrics_identity import recognizer_identity
+        except ImportError:
+            from lyrics_identity import recognizer_identity
+        identity=recognizer_identity(Path(selected_model_path))
+        cache_config='cpu-review-policy-v5:'+cache_policy({
+            'engine':engine,'policy':policy,'identity':identity,
+            'decoder':{'compute_type':'int8','beam_size':3,'word_timestamps':True,
+                       'condition_on_previous_text':False,'vad_filter':False,
+                       'initial_prompt':None,'no_speech_threshold':.6,
+                       'temperature':[0,.2],'cpu_threads':os.environ.get('GNB_LYRICS_CPU_THREADS','2')}})
+    except Exception as error:
+        # Cache acceleration is optional; identity failure cannot disable the
+        # recognizer, lower review requirements, or expose exception contents.
+        if evidence is not None:
+            evidence['cache']={'status':'disabled','reason':'Model/runtime identity could not be verified ('+type(error).__name__+').'}
+    else:
+        if evidence is not None:evidence['cache']={'status':'identity-verified','identity':identity}
+    result={};pending_cache=[]
     for n,(key,start,end) in enumerate(windows):
         clip=audio[round(start*sr):round(end*sr)]
-        cache=evidence_path(clip,sr,engine+'-beam3-policy-v4:'+cache_policy(policy)+':'+str(start))
-        cached=read_evidence(cache,end)
+        cache=evidence_path(clip,sr,cache_config+':'+str(start)) if cache_config is not None else None
+        cached=read_evidence(cache,end) if os.environ.get('GNB_LYRICS_FRESH_RECOGNITION')!='1' else None
         if cached is not None:
             if evidence is not None:
                 reader=getattr(lyrics_cache,'read_evidence_metadata',lambda p:None)
@@ -176,10 +199,17 @@ def recognize(audio,sr,windows,engine,progress,evidence=None):
             raw['segments'].append(segment_evidence(cue,offset=start))
             for w in cue.words or []:
                 if w.word.strip():words.append({'text':w.word.strip(),'start':round(start+w.start,3),'end':round(start+w.end,3),'score':float(w.probability)})
-        write_evidence(cache,words,raw)
+        if cache is not None:pending_cache.append((cache,words,raw))
         if evidence is not None:evidence['windows'].append({'key':key,'start':start,'end':end,'cached':False,'recognition':raw})
         result[key]=words;progress('reviewing',(n+1)/len(windows),f'Checking the vocal with {engine}; no title prompt is used.')
-    del model;release_memory();return result
+    try:
+        if pending_cache:
+            if recognizer_identity(Path(selected_model_path))!=identity:
+                raise RuntimeError('Review model/runtime changed during recognition; no new cache evidence retained.')
+            for cache,words,raw in pending_cache:write_evidence(cache,words,raw)
+    finally:
+        del model;release_memory()
+    return result
 
 def review(source,work,data,progress,preserve_text=False):
     import numpy as np

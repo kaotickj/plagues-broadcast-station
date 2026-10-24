@@ -82,3 +82,72 @@ def write_evidence(path,words,recognition=None):
     if path is None or path.is_symlink():return
     try:atomic(path,{'words':words,**({'recognition':recognition} if recognition is not None else {})});prune(path.parent)
     except (OSError,ValueError,TypeError):return
+
+
+PRIMARY_SCHEMA = 'raw-primary-recognition-2'
+PRIMARY_LIMIT = 2 * 1024 * 1024
+
+
+def primary_path(pcm_sha, identity, policy, start, end):
+    folder = directory()
+    if folder is None: return None
+    value = {'schema': PRIMARY_SCHEMA, 'pcm_sha256': pcm_sha, 'identity': identity,
+             'policy': policy, 'start': start, 'end': end}
+    key = hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    return folder / ('evidence-' + key + '.json')
+
+
+def _primary_valid(raw, identity):
+    # Decoder evidence, not validated lyrics: retain measured zero-duration or
+    # stretched words so retrying CTC/review need not rerun recognition. All
+    # downstream timing/quality/save guards still run identically on cache hits.
+    if not isinstance(identity, dict) or not isinstance(raw, dict) or set(raw) - {'systeminfo', 'model', 'params', 'result', 'transcription'}:
+        return False
+    rows = raw.get('transcription')
+    duration = identity.get('duration')
+    if (not isinstance(duration, (int, float)) or isinstance(duration, bool) or
+            not math.isfinite(duration) or duration <= 0 or not isinstance(rows, list) or not 0 < len(rows) <= 10000):
+        return False
+    previous = 0
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('text'), str): return False
+        bounds = row.get('offsets')
+        if not isinstance(bounds, dict): return False
+        a, b = bounds.get('from'), bounds.get('to')
+        if not all(type(v) in (int, float) and math.isfinite(v) for v in (a, b)): return False
+        # Whisper decodes a final padded30s block. Preserve that raw evidence;
+        # it must not become a claim that the tail is valid recording timing.
+        if not 0 <= a <= b <= (duration + 30) * 1000 + .001: return False
+        if a < previous: return False
+        previous = a
+        tokens = row.get('tokens')
+        if not isinstance(tokens, list) or not tokens: return False
+        for token in tokens:
+            if not isinstance(token, dict) or not isinstance(token.get('text'), str): return False
+            score = token.get('p')
+            if type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 1: return False
+    return True
+
+
+def read_primary(path, identity):
+    try:
+        if path is None or path.is_symlink() or not path.is_file() or path.stat().st_size > PRIMARY_LIMIT: return None
+        data = json.loads(path.read_text())
+        raw = data.get('raw')
+        if data.get('version') != PRIMARY_SCHEMA or data.get('identity') != identity or not _primary_valid(raw, identity): return None
+        payload = json.dumps(raw, sort_keys=True, allow_nan=False).encode()
+        if hashlib.sha256(payload).hexdigest() != data.get('raw_sha256'): return None
+        return raw
+    except (OSError, ValueError, TypeError, AttributeError): return None
+
+
+def write_primary(path, raw, identity):
+    try:
+        if path is None or path.is_symlink() or not _primary_valid(raw, identity): return False
+        data = {'version': PRIMARY_SCHEMA, 'identity': identity, 'raw': raw,
+                'raw_sha256': hashlib.sha256(json.dumps(raw, sort_keys=True, allow_nan=False).encode()).hexdigest()}
+        if len(json.dumps(data, allow_nan=False).encode()) > PRIMARY_LIMIT: return False
+        atomic(path, data)
+        prune(path.parent)
+        return True
+    except (OSError, ValueError, TypeError): return False

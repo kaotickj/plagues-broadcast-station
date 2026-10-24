@@ -118,6 +118,7 @@ def prepare_environment(config: ExtractionConfig) -> None:
         "GNB_LYRICS_GPU_WAIT": "1" if config.wait_for_gpu else "0",
         "GNB_LYRICS_GPU_WAIT_SECONDS": str(config.gpu_wait_seconds),
         "GNB_LYRICS_ROCM_SEPARATION": "0",
+        "GNB_LYRICS_FRESH_RECOGNITION": "0" if config.reuse_recognition else "1",
         "GNB_LYRICS_CPU_THREADS": str(config.cpu_threads),
         "OMP_NUM_THREADS": str(config.cpu_threads),
         "GNB_LYRICS_CACHE_DIR": str(cache / "derived"),

@@ -177,6 +177,9 @@ def test_high_confidence_credit_gets_fresh_review_but_is_not_deleted_on_blank_pa
 
 def test_independent_review_raw_cache_is_policy_bound_and_preserves_diagnostics(tmp_path,monkeypatch):
     from gnb_player.extraction_backend import lyrics_review as review
+    import importlib
+    lyrics_identity=importlib.import_module('gnb_player.extraction_backend.lyrics_identity')
+    monkeypatch.setattr(lyrics_identity,'recognizer_identity',lambda *a:{'model_sha256':'a'*64,'runtime_sha256':'b'*64})
     monkeypatch.setenv('GNB_LYRICS_LANGUAGE','en');monkeypatch.setenv('GNB_LYRICS_PROMPT','Do not share this prompt with reviewer')
     word=SimpleNamespace(word='Rain',start=.1,end=.8,probability=.9)
     segment=SimpleNamespace(text='Rain',start=0,end=1,words=[word],avg_logprob=-.1,compression_ratio=1,no_speech_prob=.1)
@@ -193,4 +196,4 @@ def test_independent_review_raw_cache_is_policy_bound_and_preserves_diagnostics(
     assert evidence['settings']['prompt']==''
     assert evidence['windows'][0]['recognition']['segments'][0]['no_speech_prob']==.1
     assert len(saved[0])==3 and saved[0][2]['segments']
-    assert 'policy-v4:' in paths[0]
+    assert 'policy-v5:' in paths[0]
