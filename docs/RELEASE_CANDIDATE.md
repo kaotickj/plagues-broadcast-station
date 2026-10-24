@@ -5,6 +5,15 @@ change (`24cc6bf`, locally replayed as `42d140b`), and preserved phase-scoped GP
 patches. Original checkouts, their uncommitted work, installed binaries, launchers,
 lyrics and media remain outside this candidate and are not modified by the work.
 
+## 0.2.4rc3 preview preference follow-up
+
+Unapproved saved lyric preview defaults on only for a station without a saved
+choice. The last explicit on/off choice survives session/playlist saves, restart,
+track selection and imported/prepared results. Explicit false values are retained;
+legacy playlists without the preference keep the current choice. Lyrics-ready-only
+eligibility, recording checks, saved/unsaved boundaries and approval remain separate.
+This follow-up is prepared locally; it does not alter an active installed window.
+
 ## 0.2.4rc2 Save follow-up
 
 Save lyrics updates the selected recording without a path dialog; Export lyrics…

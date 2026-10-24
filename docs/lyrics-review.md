@@ -48,11 +48,14 @@ because you change or save text. **More lyric options** contains import,
 extraction, a supplied-sheet field and preview controls for existing lyrics.
 For a recording without lyrics, preparation buttons appear immediately.
 
-Unapproved lyrics stay off Program Output and out of **Lyrics-ready tracks
-only**. The optional **Preview unapproved saved lyrics on Program Output**
-control explicitly allows a saved draft onto that output; it starts unchecked
-and resets for another recording or newly prepared/imported revision. It does
-not approve or save anything. An intentionally empty saved draft remains
+Unapproved lyrics stay out of **Lyrics-ready tracks only**. **Preview unapproved
+saved lyrics on Program Output** independently allows a saved draft onto that
+output; it starts checked for a station with no saved preference and remembers
+the last explicit on/off choice in its playlist/session. Selecting another
+recording or preparing/importing lyrics preserves that choice. Opening a legacy
+playlist without the preference keeps the current choice. Preview does not
+approve or save lyrics, and unsaved corrections stay off Program Output until
+Save succeeds. An intentionally empty saved draft remains
 unapproved and cannot be made Lyrics Ready; clearing false text does not
 claim automatic instrumental detection.
 

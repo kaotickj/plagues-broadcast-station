@@ -35,6 +35,20 @@ retained as evidence and cannot approve the new text. **Approve for airing**
 still requires separate review of the saved lyrics against that recording.
 Neither Save nor local airing approval publishes to a website.
 
+## Timed lyric preview preference
+
+In **Lyrics → More lyric options**, **Preview unapproved saved lyrics on Program
+Output** starts checked when a station has no saved choice. Its last on/off choice
+is saved with that station's playlist/session and restored on restart, including
+an explicit off choice. Opening an older playlist without this setting keeps the
+current choice. Selecting a recording, importing lyrics or saving a correction
+does not reset it. Separate station data directories keep separate preferences.
+
+The **Lyrics-ready tracks only** playback filter is independent and still requires
+approval for the exact saved lyric revision and recording. Preview never approves
+lyrics or includes unapproved recordings in that filtered queue. Unsaved edits
+stay out of Program Output until Save succeeds; source identity checks still apply.
+
 Cooperating saves use a write lock and expected revision checks. Extraction
 compares the target revision captured before processing before replacing it; a
 newer human correction causes a conflict rather than an automatic overwrite.

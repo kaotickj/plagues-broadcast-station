@@ -102,7 +102,7 @@ Broadcast Station's local lyrics/session and the website CMS lyric store are ind
 WHEN SOMETHING LOOKS WRONG
 If Save fails or reports a conflict, keep the editor open and read the status. A newer saved revision or changed recording must be resolved before overwriting; Reload saved discards the pending edits for that recording. A partial save can mean the lyric JSON committed but its session link still needs a retry. Do not assume the lyrics are saved until the status confirms success.
 
-If lyrics will not appear on Program Output, check that the saved revision is approved for this recording. Draft preview is an explicit option. Extraction failures or uncertain recognition need review; preserve the raw findings rather than guessing corrections.
+If lyrics will not appear on Program Output, check Picture & sound > Show sing-along lyrics and Lyrics > More lyric options > Preview unapproved saved lyrics on Program Output. Preview defaults on for a new station and remembers your last choice in its saved playlist/session. Lyrics-ready tracks only independently limits playback to approved recordings. Save pending corrections before previewing their saved timing. Extraction failures or uncertain recognition need review; preserve the raw findings rather than guessing corrections.
 
 If controls or behavior seem older than expected, compare this running version and recorded build identity with the intended package. An already open older window keeps its old code. Check desktop, menu and panel shortcut targets; close the older window yourself before launching the intended build. Help never replaces the app or starts a download.
 """

@@ -248,7 +248,7 @@ def test_importing_an_approved_document_creates_an_unapproved_saved_revision(win
     result=load_lyrics(cached)
     assert result.segments[0].text==imported.segments[0].text and not is_approved(result)
     assert 'LYRICS NEED REVIEW' in window.playlist.item(0).text()
-    assert not window.allow_drafts.isChecked() and not window._has_lyrics(track)
+    assert window.allow_drafts.isChecked() and not window._has_lyrics(track)
 
 
 def test_intentionally_empty_draft_can_be_saved_but_never_approved(window,tmp_path,pending):

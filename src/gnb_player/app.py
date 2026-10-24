@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         self.reference=QPlainTextEdit(); self.reference.setPlaceholderText('Optional complete lyric sheet. To correct a prepared transcript, edit its lines above.'); self.reference.setAccessibleName('Optional complete lyric sheet for alignment'); self.reference.setMinimumHeight(80); self.reference.setMaximumHeight(180); options.addWidget(self.reference)
         self.align_button=self._button('Align supplied sheet',lambda:self.queue_extraction(True)); options.addWidget(self.align_button)
         row=QHBoxLayout(); self.offset=QDoubleSpinBox(); self.offset.setRange(-15,15); self.offset.setSingleStep(.1); self.offset.setDecimals(1); self.offset.setSuffix(' s'); self.offset.setAccessibleName('Move lyric highlights earlier or later'); self.offset.valueChanged.connect(self.stage.set_offset); row.addWidget(QLabel('Preview timing adjustment')); row.addWidget(self.offset); row.addWidget(self._button('Reset',lambda:self.offset.setValue(0))); options.addLayout(row)
-        self.allow_drafts=QCheckBox('Preview unapproved saved lyrics on Program Output'); self.allow_drafts.setChecked(False); self.allow_drafts.toggled.connect(self._reload_current_lyrics); options.addWidget(self.allow_drafts)
+        self.allow_drafts=QCheckBox('Preview unapproved saved lyrics on Program Output'); self.allow_drafts.setChecked(True); self.allow_drafts.toggled.connect(self._draft_preview_toggled); options.addWidget(self.allow_drafts)
         self.lyric_options_panel.hide(); content.addWidget(self.lyric_options_panel)
         scroll.setWidget(body); v.addWidget(scroll,1)
         self.lyric_save_status=QLabel('Edits are saved per recording. Automatic preparation does not approve lyrics.'); self.lyric_save_status.setWordWrap(True); self.lyric_save_status.setAccessibleName('Lyric save and review status'); self.lyric_save_status.setTextFormat(Qt.TextFormat.PlainText); v.addWidget(self.lyric_save_status)
@@ -422,7 +422,6 @@ class MainWindow(QMainWindow):
         if changed_track or previous_revision!=self._editor_revision:self.review_confirm.setChecked(False)
         if changed_track:
             self.reference.clear()
-            blocked=self.allow_drafts.blockSignals(True);self.allow_drafts.setChecked(False);self.allow_drafts.blockSignals(blocked)
             if self.engine.current_track:self._update_program_lyrics(self.engine.current_track,self.documents.get(str(self.engine.current_track.path)))
         buffer=self._lyric_buffers.get(key)
         if document:
@@ -456,6 +455,10 @@ class MainWindow(QMainWindow):
         self.documents.pop(str(t.path),None)
         if self.engine.current_track and self.engine.current_track.path==t.path:self.stage.set_lyrics(None)
         self._load_track_lyrics(t)
+    def _draft_preview_toggled(self,checked):
+        track=self.engine.current_track
+        if track:self._update_program_lyrics(track,self.documents.get(str(track.path)))
+        self._schedule_save()
     def _selection_changed(self,current,previous):
         self.lyric_text.commit_pending_edit()
         if current:
@@ -777,6 +780,11 @@ class MainWindow(QMainWindow):
         settings=data.get('settings',{}); self.brand.setText(settings.get('brand','GOODNEIGHBOR BLUES')); self.tagline.setText(settings.get('tagline','Original blues. Stay awhile.'))
         self.interval.setValue(max(5,min(300,int(settings.get('interval_seconds',18)))))
         for key,widget in [('motion',self.motion),('waveform',self.wave),('lyrics',self.lyrics_visible)]:widget.setChecked(bool(settings.get(key,True)))
+        # This preference belongs to the station profile/session. A legacy
+        # playlist without it keeps the operator's current choice; explicit
+        # false must survive loading, track selection and prepared results.
+        preview=settings.get('preview_unapproved_lyrics')
+        if isinstance(preview,bool):self.allow_drafts.setChecked(preview)
         self.set_waveform_color(settings.get('waveform_color',DEFAULT_WAVEFORM_COLOR))
         self.documents.clear();self._lyric_stamps.clear();self._invalid_lyrics.clear();self.engine.set_queue([],preserve_current=False); self.ready_only.setChecked(bool(data.get('settings',{}).get('lyrics_ready_only',False))); self._apply_queue(); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self.apply_appearance()
         self._message(f'{self.profile_name}: {len(self.all_tracks)} recordings and {len(self.lyric_files)} prepared lyric files loaded.')
@@ -791,7 +799,7 @@ class MainWindow(QMainWindow):
     def add_backgrounds(self):
         paths,_=QFileDialog.getOpenFileNames(self,'Add artwork or looping video','','Artwork and video ('+' '.join('*'+x for x in sorted(IMAGE_SUFFIXES|VIDEO_SUFFIXES))+')')
         self.backgrounds=list(dict.fromkeys(self.backgrounds+[Path(p).resolve() for p in paths])); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self._schedule_save()
-    def visual_settings(self):return {'brand':self.brand.text(),'tagline':self.tagline.text(),'interval_seconds':self.interval.value(),'motion':self.motion.isChecked(),'waveform':self.wave.isChecked(),'waveform_color':self._waveform_color,'lyrics':self.lyrics_visible.isChecked(),'lyrics_ready_only':self.ready_only.isChecked()}
+    def visual_settings(self):return {'brand':self.brand.text(),'tagline':self.tagline.text(),'interval_seconds':self.interval.value(),'motion':self.motion.isChecked(),'waveform':self.wave.isChecked(),'waveform_color':self._waveform_color,'lyrics':self.lyrics_visible.isChecked(),'lyrics_ready_only':self.ready_only.isChecked(),'preview_unapproved_lyrics':self.allow_drafts.isChecked()}
     def _update_waveform_color_button(self):
         color=QColor(self._waveform_color)
         text='#101c24' if color.lightnessF()>.5 else '#ffffff'
@@ -843,9 +851,6 @@ class MainWindow(QMainWindow):
     def _lyrics_ready(self,track,target,document):
         key=str(track.path); self._lyric_requests[key]=self._lyric_requests.get(key,0)+1
         self._lyric_locations[key]=Path(target)
-        shown=self._editor_track
-        if not is_approved(document) and ((shown and shown.path==track.path) or (self.engine.current_track and self.engine.current_track.path==track.path)):
-            blocked=self.allow_drafts.blockSignals(True);self.allow_drafts.setChecked(False);self.allow_drafts.blockSignals(blocked)
         self.lyric_files[str(track.path)]=str(target);self._remember_document(track,document)
         self._apply_queue(); self._schedule_save()
         self._display_relevant_document(track,document)
