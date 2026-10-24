@@ -5,9 +5,11 @@ import ctypes
 from functools import lru_cache
 import os
 from pathlib import Path
+import time
 
 
 _WINDOWS = os.name == "nt"
+_POSIX_CTIME_SETTLE_NS = 2_000_000_000
 
 
 class _FileBasicInfo(ctypes.Structure):
@@ -61,12 +63,24 @@ def _windows_change_time(path):
 def file_change_stamp(path, state=None):
     """Return a cache stamp, or None when callers must hash file content.
 
-    POSIX ctime changes on a content rewrite, even when mtime is restored.
-    Windows st_ctime is creation time, so it cannot safely serve that role.
+    POSIX ctime can coalesce across rapid rewrites within one filesystem clock
+    tick, even when its stat field is expressed in nanoseconds. Until ctime is
+    at least two seconds old, require content hashing instead of caching it.
+    This settling bound assumes POSIX content-change timestamp granularity is
+    no coarser than two seconds; it is not a universal inode version counter.
+    Future/invalid ctime also disables reuse, including during clock rollback.
+    Once settled, unchanged audio can reuse its hash without periodic full-song
+    hashing. Windows keeps its native ChangeTime query: st_ctime there is creation
+    time and cannot safely serve that role.
     """
     state = state if state is not None else Path(path).stat()
     stamp = (state.st_size, state.st_mtime_ns, state.st_ctime_ns, state.st_ino)
     if not _WINDOWS:
+        changed = state.st_ctime_ns
+        if not isinstance(changed, int) or isinstance(changed, bool) or changed <= 0:
+            return None
+        if time.time_ns() - changed < _POSIX_CTIME_SETTLE_NS:
+            return None
         return stamp
     changed = _windows_change_time(path)
     return stamp + (changed,) if changed is not None else None

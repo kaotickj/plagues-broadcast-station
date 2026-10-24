@@ -17,7 +17,7 @@ from . import __version__
 from .library import Track, scan_media, MEDIA_EXTENSIONS
 from .playback import PlaybackEngine
 from .stage import BroadcastStage, IMAGE_SUFFIXES, VIDEO_SUFFIXES, DEFAULT_WAVEFORM_COLOR, waveform_color
-from .lyrics import load_lyrics, load_imported_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path
+from .lyrics import load_lyrics, load_imported_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path, lyric_content_revision
 from .file_state import file_change_stamp
 from .lyric_review import document_revision, is_approved, edit_document, retarget_review, save_review_document
 from .lyric_editor import TimedLyricsEditor, stored_review_notes, parse_seconds
@@ -360,10 +360,10 @@ class MainWindow(QMainWindow):
             location=self.lyric_files.get(key) or self._lyric_locations.get(key)
             if location:
                 try:
-                    state=Path(location).stat()
-                    stored_stamp=file_change_stamp(location,state)
-                    self._lyric_file_stamps[key]=stored_stamp if stored_stamp is not None else ('content',fingerprint(location))
-                except OSError:self._lyric_file_stamps.pop(key,None)
+                    # Small lyric files use bounded byte hashes. Metadata can
+                    # coalesce same-tick writes and can settle during playback.
+                    self._lyric_file_stamps[key]=lyric_content_revision(location)
+                except (OSError,ValueError):self._lyric_file_stamps.pop(key,None)
             try:self._lyric_stamps[key]=(track.path.stat().st_size,track.path.stat().st_mtime_ns)
             except OSError:self._invalid_lyrics.add(key)
         else:self.documents.pop(key,None);self._lyric_stamps.pop(key,None);self._invalid_lyrics.add(key)
@@ -386,11 +386,9 @@ class MainWindow(QMainWindow):
             check_stamp=file_change_stamp(track.path,state)
             if key in self._lyric_stamps and self._lyric_stamps[key]!=stamp:return False
             location=self.lyric_files.get(key) or self._lyric_locations.get(key)
-            if location and key in self._lyric_file_stamps:
-                stored=Path(location).stat()
-                stored_stamp=file_change_stamp(location,stored)
-                if stored_stamp is None:stored_stamp=('content',fingerprint(location))
-                if self._lyric_file_stamps[key]!=stored_stamp:return False
+            if location:
+                expected=self._lyric_file_stamps.get(key)
+                if expected is None or expected!=lyric_content_revision(location):return False
             checked=self._source_checks.get(key)
             if check_stamp is None or not checked or checked[0]!=check_stamp:
                 identity=fingerprint(track.path)
@@ -398,10 +396,13 @@ class MainWindow(QMainWindow):
                 after_stamp=file_change_stamp(track.path,after)
                 before_metadata=(state.st_size,state.st_mtime_ns,state.st_ctime_ns,state.st_ino)
                 after_metadata=(after.st_size,after.st_mtime_ns,after.st_ctime_ns,after.st_ino)
-                if check_stamp!=after_stamp or before_metadata!=after_metadata:return False
+                if before_metadata!=after_metadata:return False
+                # Crossing the settling interval is eligibility for caching,
+                # not a content change. Recheck once next time before caching.
+                if check_stamp!=after_stamp and not (check_stamp is None and after_stamp is not None):return False
                 self._source_checks[key]=(check_stamp,identity)
             return not document.source_sha256 or document.source_sha256==self._source_checks[key][1]
-        except OSError:return False
+        except (OSError,ValueError):return False
     def _document_ready(self,track,document):
         key=str(track.path)
         if not document or key in self._lyric_buffers or not is_approved(document):return False

@@ -223,6 +223,11 @@ def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
     return _parse_lyric_bytes(file, _read_lyric_bytes(file), duration)
 
 
+def lyric_content_revision(path: str | Path) -> str:
+    """Hash the bounded saved lyric bytes, including readable subtitle links."""
+    return sha256(_read_lyric_bytes(Path(path))).hexdigest()
+
+
 def _json_bytes(data) -> bytes:
     return json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
 
