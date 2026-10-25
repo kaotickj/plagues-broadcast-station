@@ -260,3 +260,16 @@ def test_topic_headings_in_paths_or_release_names_do_not_split_topics(qt_app, tm
         assert 'no automatic website' in dialog.text.toPlainText()
     finally:
         dialog.close()
+
+
+def test_recovery_help_explains_separate_untimed_save_and_platform_limit(qt_app,tmp_path):
+    dialog=help_dialog.HelpDialog(data_dir=tmp_path/'unused station')
+    try:
+        dialog.show_topic('recovery')
+        text=dialog.text.toPlainText()
+        assert 'FAILED RECOGNITION DRAFTS' in text
+        assert 'Save draft text' in text and 'does not align' in text
+        assert 'Program Output' in text and 'Linux' in text and 'Cancel keeps the buffer' in text
+        assert not (tmp_path/'unused station').exists()
+    finally:
+        dialog.close()

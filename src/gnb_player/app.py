@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QSplitter, QGroupBox, QScrollArea, QColorDialog,
 )
 from .broadcast_profile import BroadcastProfileStore, StreamProfile, ProfileError
+from .recognition_draft_dialog import RecognitionDraftDialog
+from .recovery_evidence import load_open_data, source_stamp
 from . import __version__
 from .library import Track, scan_media, MEDIA_EXTENSIONS
 from .playback import PlaybackEngine
@@ -99,6 +101,7 @@ class MainWindow(QMainWindow):
         self._editor_track=None; self._editor_document=None; self._editor_revision=None
         self._last_review_poll=None
         self._extract_context=None
+        self._recovery_records={}; self._recovery_dialogs={}; self._recovery_generation=0; self._recovery_busy=False
         self.profile_name = 'Goodneighbor Blues'; self._scan_busy = False
         self._extract_queue = []; self._extract_current = None; self._process_bytes = b''
         self._closing = False; self._seek_drag = False; self._track_generation = 0; self._displayed_track = None
@@ -241,9 +244,12 @@ class MainWindow(QMainWindow):
         self.review_confirm=QCheckBox('I checked these lyrics against this recording.'); self.review_confirm.setAccessibleName('Confirm human review of this recording and saved lyric revision'); self.review_confirm.toggled.connect(self._update_review_controls); v.addWidget(self.review_confirm)
         actions=QGridLayout(); self.save_lyrics_button=self._button('Save lyrics',self._save_lyric_changes,True); self.save_lyrics_button.setToolTip('Save a draft for the selected recording automatically (Ctrl+S). No filename is needed. Does not approve airing or publish to a website.'); actions.addWidget(self.save_lyrics_button,0,0)
         self.approve_lyrics_button=self._button('Approve for airing',lambda:self._save_lyric_changes(approve=True)); actions.addWidget(self.approve_lyrics_button,0,1)
-        self.reload_lyrics_button=self._button('Reload saved',self._discard_lyric_edits); actions.addWidget(self.reload_lyrics_button,1,0)
-        self.export_lyrics_button=self._button('Export lyrics…',self._export_saved_lyrics); self.export_lyrics_button.setToolTip('Export a separate JSON copy of the saved lyrics. Save pending changes first.'); actions.addWidget(self.export_lyrics_button,1,1); v.addLayout(actions)
+        self.reload_lyrics_button=self._button('Reload saved',self._discard_lyric_edits); actions.addWidget(self.reload_lyrics_button,0,2)
+        self.export_lyrics_button=self._button('Export lyrics…',self._export_saved_lyrics); self.export_lyrics_button.setToolTip('Export a separate JSON copy of the saved lyrics. Save pending changes first.'); actions.addWidget(self.export_lyrics_button,0,3); v.addLayout(actions)
         self.lyric_save_shortcut=QShortcut(QKeySequence.StandardKey.Save,page); self.lyric_save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); self.lyric_save_shortcut.activated.connect(self._save_lyric_changes)
+        recovery=QHBoxLayout(); self.review_recognition_button=self._button('Review recognition draft',self.review_recognition_draft); self.review_recognition_button.setObjectName('review_recognition_draft'); self.review_recognition_button.setEnabled(False)
+        self.review_recognition_button.setToolTip('Open a separate untimed failure draft. Saved timed lyrics, approval and Program Output are unchanged.'); recovery.addWidget(self.review_recognition_button)
+        self.recovery_status=QLabel('Untimed drafts stay separate from saved lyrics.'); self.recovery_status.setWordWrap(True); self.recovery_status.setTextFormat(Qt.TextFormat.PlainText); self.recovery_status.setAccessibleName('Untimed recognition recovery status'); recovery.addWidget(self.recovery_status,1); v.addLayout(recovery)
         self._update_review_controls()
         self.tabs.addTab(page,'Lyrics')
 
@@ -539,6 +545,7 @@ class MainWindow(QMainWindow):
         self.prepare_actions.setVisible(not document or not document.segments or not self.lyric_options_panel.isHidden())
         self._update_program_lyrics(track,document)
         self._update_review_controls()
+        self._update_recovery_action()
     def _display_relevant_document(self,track,document):
         self._update_program_lyrics(track,document)
         shown=self._selected_track()
@@ -556,6 +563,8 @@ class MainWindow(QMainWindow):
         if track:self._update_program_lyrics(track,self.documents.get(str(track.path)))
         self._schedule_save()
     def _selection_changed(self,current,previous):
+        self._recovery_generation+=1
+        self._update_recovery_action()
         self.lyric_text.commit_pending_edit()
         if current:
             t=next((t for t in self.all_tracks if str(t.path)==current.data(Qt.ItemDataRole.UserRole)),None)
@@ -1015,6 +1024,69 @@ class MainWindow(QMainWindow):
             elif event['type']=='error':
                 self._extract_failure=str(event.get('message','Lyric extraction failed.'))
                 self._message(self._extract_failure)
+                self._retain_recovery_event(event)
+    def _update_recovery_action(self):
+        if not hasattr(self,'review_recognition_button'):return
+        track=self._selected_track()
+        self.review_recognition_button.setEnabled(bool(track) and not self._recovery_busy)
+        if not self._recovery_busy:
+            available=track and str(track.path) in self._recovery_records
+            self.recovery_status.setText('Untimed draft available.' if available else 'Untimed drafts stay separate from saved lyrics.')
+
+    def _retain_recovery_event(self,event):
+        track=self._extract_current
+        if not track:return
+        sha=event.get('source_sha256')
+        if not isinstance(sha,str) or len(sha)!=64 or any(c not in '0123456789abcdef' for c in sha):return
+        retained={'source_sha256':sha}
+        for field in ('diagnostic_path','recognition_draft_path'):
+            value=event.get(field)
+            if value is not None:
+                if not isinstance(value,str) or not value or len(value)>8192:return
+                retained[field]=value
+        if len(retained)==1:return
+        self._recovery_records[str(track.path)]=retained
+        self._update_recovery_action()
+
+    def review_recognition_draft(self):
+        track=self._selected_track()
+        if not track or self._recovery_busy:return
+        key=str(track.path)
+        self._recovery_generation+=1; generation=self._recovery_generation
+        self._recovery_busy=True; self._update_recovery_action()
+        self.recovery_status.setText('Checking recording and draft…')
+        event=dict(self._recovery_records.get(key,{}))
+        cache=Path(self.extract_config.cache_dir)
+        def work():
+            try:return True,load_open_data(cache,track.path,event)
+            except Exception as error:return False,str(error)
+        def done(result):
+            self._recovery_busy=False; self._update_recovery_action()
+            selected=self._selected_track()
+            if self._closing or generation!=self._recovery_generation or not selected or selected.path!=track.path:return
+            ok,value=result
+            if not ok:self.recovery_status.setText('Recovery not opened · '+value); return
+            try:
+                if source_stamp(track.path)!=value.source_stamp:raise ValueError('The recording changed after recovery was read. Retry opening its current draft.')
+            except (OSError,ValueError) as error:
+                self.recovery_status.setText('Recovery not opened · '+str(error)); return
+            existing=self._recovery_dialogs.get((key,value.source_sha256))
+            if existing is not None and existing.isVisible():
+                # Freshly verified matching bytes; the existing child keeps its
+                # unsaved buffer even when another failed attempt was retained.
+                existing.raise_(); existing.activateWindow(); return
+            def selected_original():
+                current=self._selected_track()
+                return not self._closing and current is not None and current.path==track.path
+            dialog=RecognitionDraftDialog(value.snapshot,self,source_path=track.path,
+                source_sha256=value.source_sha256,recording_title=track.title,
+                diagnostics_text=value.diagnostics_text,original_text=value.original_text,
+                verify_source=selected_original)
+            self._recovery_dialogs[(key,value.source_sha256)]=dialog
+            dialog.show(); dialog.raise_(); dialog.activateWindow()
+            self.recovery_status.setText('Untimed draft open · timed lyrics unchanged.' if value.snapshot is not None else 'Read-only failure details open.')
+        self._task(work,done)
+
     def _extract_stderr(self):self._extract_log=(self._extract_log+bytes(self.extract_process.readAllStandardError()).decode(errors='replace'))[-4000:]
     def _process_error(self,error):
         self._message(self.extract_process.errorString())
@@ -1330,6 +1402,10 @@ class MainWindow(QMainWindow):
             self.toggle_play(); event.accept()
         else:super().keyPressEvent(event)
     def closeEvent(self,event):
+        if not self._closing:
+            for dialog in self._recovery_dialogs.values():
+                if dialog.isVisible() and not dialog.close():
+                    self._message('Finish or close the recognition draft before closing the station.'); event.ignore(); return
         self.lyric_text.commit_pending_edit()
         if not self._closing and self._lyric_buffers:
             if self._saving_lyrics:

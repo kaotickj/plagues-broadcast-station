@@ -117,6 +117,13 @@ Select the recording, then open Lyrics. Double-click a lyric cell or press F2 to
 
 A saved draft is not approval. Listen against this exact recording, confirm human review, then choose Approve for airing. Editing again creates a draft that needs a new review. Local Save lyrics and Approve for airing do not publish lyrics to a website. Automatic preparation does not approve lyrics or prove that the recognized words are correct.
 
+FAILED RECOGNITION DRAFTS
+If automatic recognition fails, choose Lyrics > Review recognition draft. It opens a separate untimed text window for this exact recording. Edit the text and choose Save draft text (Ctrl+S) to keep corrections without a filename picker. Copy draft text copies the current buffer. Original recognition and the raw failure reports stay read-only beside the editor. Reload saved asks before discarding changes; Cancel keeps the buffer. Closing a dirty recovery window offers Save, Discard or Cancel and leaves the player open.
+
+Saving recovery text does not align words, replace saved timed lyrics, approve or publish anything, change lyrics-ready status, or display the text on Program Output. It does not fix recognition accuracy. Retry preserves existing human recovery text. A later timing step must be explicit and separately validated; this recovery window does not start one. Select the original recording again if a selection change blocks saving. If the source bytes or saved draft revision changed, keep/copy your buffer and resolve the reported conflict before retrying.
+
+Drafts reopen from this station's separate recognition-drafts folder. Editable storage currently supports Linux; on unsupported platforms or when no editable draft was retained, a structured failure report can still open read-only diagnostics. No raw failure path is guessed from an error message.
+
 STORAGE ON THIS DEVICE
 Station data directory: {location}
 Session and recording-to-lyrics links: {location / 'session.json'}
@@ -152,6 +159,7 @@ _HELP_TOPICS = (
     ('broadcast', 'Broadcast and bitrate', 'BROADCAST AND BITRATE'),
     ('profiles', 'Save and reload stream settings', 'SAVE AND RELOAD A STREAM PROFILE'),
     ('lyrics', 'Edit, save and approve lyrics', "EDIT AND SAVE THE SELECTED SONG'S LYRICS"),
+    ('recovery', 'Failed recognition drafts', 'FAILED RECOGNITION DRAFTS'),
     ('storage', 'Storage on this device', 'STORAGE ON THIS DEVICE'),
     ('website', 'Website and radio stores', 'WEBSITE AND RADIO STORES'),
     ('keyboard', 'Keyboard access', 'KEYBOARD ACCESS'),

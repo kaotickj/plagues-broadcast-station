@@ -49,6 +49,8 @@ The **Lyrics** tab shows saved review notes and an editable timed transcript. Co
 Double-click a lyric cell or press F2 to edit. Save lyrics and Ctrl+S commit the
 current typed cell, then save the recording link before reporting success. Use
 **Expand editor** or drag the workspace dividers for more room. **Export lyrics…** exports a separate copy of the saved revision; save pending edits first.
+After failed automatic extraction, **Review recognition draft** opens a separate editable, untimed text draft with read-only original evidence. **Save draft text** preserves corrections independently of timed lyrics, approval and Program Output. [Recognition recovery](docs/RECOGNITION_RECOVERY.md) explains revision conflicts, reopening, cancellation and Linux storage support. Recovery UI wiring does not establish ASR accuracy.
+
 The operator window title includes the version so a stale shortcut is visible.
 Choose **Help** (F1) for running version/build details, basic usage, storage paths
 and troubleshooting. Topics and Ctrl+F search work offline; Broadcast help links to official YouTube encoder guidance. Closing Help leaves the Operator Desk open. Advanced model paths are behind an explicit disclosure; start with Set up / find models for guided setup.
