@@ -1,5 +1,8 @@
 # Linux installer and upgrade
 
+> **Development controlled-test candidate:** current source is 0.2.4rc11.dev1, not a stable release. Read [controlled-test readiness](docs/CONTROLLED_TEST_READINESS.md) before applying any activation/rollback instructions below. The original strict installer remains unchanged. A patched RC10 rollback needs the pinned hotfix-aware route; current unmanifested backups/bytecode are preserved and refused, not silently ignored. No installation or real-keyring access is authorized by this document.
+
+
 The local 0.2.4rc2 candidate uses the same managed installer and rollback format.
 See [candidate acceptance](docs/RELEASE_CANDIDATE.md) for scope and verification
 limits. Preparing this package does not upgrade an existing installation.

@@ -12,6 +12,11 @@ worker_data = [(str(package / name), "gnb_player")
                             "model_install_worker.py", "model_discovery.py")]
 worker_data += [(str(path), "gnb_player/extraction_backend")
                 for path in sorted((package / "extraction_backend").glob("*.py"))]
+# Explicit operational readiness tools are data for an external Python; they
+# never run during packaging or normal player startup.
+readiness_data = [(str(root / "scripts" / name), "readiness_tools")
+                  for name in ("linux_installer.py", "rc10_hotfix.py", "rc10-neighbour-guard-policy.json",
+                               "controlled_activation.py", "station_snapshot.py")]
 assets = [(str(path), "assets") for path in (root / "assets").glob("*") if path.is_file()]
 assets += [(str(path), "gnb_player/assets")
            for path in (package / "assets").glob("*") if path.is_file()]
@@ -43,7 +48,7 @@ a = Analysis(
     [str(root / "launch.py")],
     pathex=[str(root / "src")],
     binaries=[(ffmpeg, "bin"), (ffprobe, "bin")],
-    datas=worker_data + assets + notices,
+    datas=worker_data + readiness_data + assets + notices,
     hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtMultimedia", *credential_imports],
     hookspath=[],
     hooksconfig={},

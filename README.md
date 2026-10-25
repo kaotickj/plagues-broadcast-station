@@ -30,6 +30,8 @@ An on-screen waveform is a visual response to the decoded audio, not microphone 
 
 See [the OBS guide](docs/OBS.md) for scene and audio setup. No livestream is started merely by opening the app. Direct streaming requires an explicit start action and a destination/key supplied by the operator. Portable playlists and settings exclude stream credentials; Save profile keeps ordinary stream settings, with an explicit Remember stream key option for native protected storage as described in [Broadcast profiles](docs/BROADCAST_PROFILE.md).
 
+Development builds are identified explicitly in the version and Help. [Controlled-test readiness](docs/CONTROLLED_TEST_READINESS.md) describes the narrowly pinned RC10 hotfix verifier, private station snapshots and journaled code-only rollback. These tools do not grant installation approval, stop apps or restore user data automatically.
+
 ## Set up lyric models
 
 Open model setup from **Lyric models**, or start the app with `--setup-models`. The wizard scans known model/cache folders and folders you choose, shows compatible existing models and Python runtimes, and lets you reuse them. It also checks a local Ollama connection and lists its existing model tags. Scanning does not install or download anything.

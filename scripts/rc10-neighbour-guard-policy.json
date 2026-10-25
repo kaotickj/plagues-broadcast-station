@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "release": "0.2.4rc10-bbd19a143aaa-8c08098389c3",
+  "version": "0.2.4rc10",
+  "source_commit": "bbd19a143aaa1c4839f7c185cb48d16feb859846",
+  "original_manifest_sha256": "10c691e0ebbe285f92a8989cdb753d1eff4d34e06497301e0e1f00555abbbf14",
+  "binary_sha256": "4854710c06ef19df68d431536018b524cb0a3790a989131c8fb5ef3c334f6333",
+  "guard_path": "_internal/gnb_player/extraction_backend/lyrics_review.py",
+  "original_guard_sha256": "b908929a92f3667a17ba930daca8a072cc69e719598fa49f3c95f9301a851fec",
+  "approved_guard_sha256": "c2de5f76954496bfaec6f7eef933ee3dc127a6a31354d97793db51ae1a630934",
+  "regular_mode": 420,
+  "executable_mode": 493,
+  "directory_mode": 509,
+  "manifest_mode": 420,
+  "empty_directories": [],
+  "root_directory_mode": 448
+}

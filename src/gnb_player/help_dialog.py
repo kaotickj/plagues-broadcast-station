@@ -79,10 +79,19 @@ def _build_details() -> str:
     return '\n'.join(lines)
 
 
+def _channel_details() -> str:
+    if '.dev' in __version__:
+        return 'Build channel: development controlled-test candidate; not a stable release.'
+    if 'rc' in __version__:
+        return 'Build channel: release candidate.'
+    return 'Build channel: release.'
+
+
 def _help_text(data_dir: Path) -> str:
     location = Path(data_dir).resolve()
     return f"""Plague's Broadcast Station
 Running app version: {__version__}
+{_channel_details()}
 {_build_details()}
 
 BASIC USE

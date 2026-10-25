@@ -273,3 +273,18 @@ def test_recovery_help_explains_separate_untimed_save_and_platform_limit(qt_app,
         assert not (tmp_path/'unused station').exists()
     finally:
         dialog.close()
+
+
+def test_development_candidate_channel_matches_version_and_package_metadata(qt_app,tmp_path):
+    import tomllib
+    project=Path(__file__).resolve().parents[1]/'pyproject.toml'
+    assert tomllib.loads(project.read_text())['project']['version']==__version__
+    assert '.dev' in __version__
+    dialog=help_dialog.HelpDialog(data_dir=tmp_path/'unused station')
+    try:
+        text=dialog.text.toPlainText()
+        assert 'Running app version: '+__version__ in text
+        assert 'development controlled-test candidate; not a stable release' in text
+        assert not (tmp_path/'unused station').exists()
+    finally:
+        dialog.close()
