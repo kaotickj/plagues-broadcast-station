@@ -391,3 +391,38 @@ def test_broken_journal_link_is_preserved_not_replaced(station):
     with pytest.raises(ValueError):
         controlled.prepare(value, item['audit'], approved=True, apps_closed=True, policy=item['policy'])
     assert link.is_symlink() and not (item['audit'] / 'missing-target').exists()
+
+
+
+def test_regular_cli_help_does_not_create_bytecode_or_change_helper_inventory(tmp_path):
+    import os
+    import shutil
+    import subprocess
+
+    copied = tmp_path / 'copied immutable readiness tools'
+    copied.mkdir()
+    for name in ('controlled_activation.py', 'linux_installer.py', 'rc10_hotfix.py',
+                 'rc10-neighbour-guard-policy.json'):
+        shutil.copy2(SCRIPTS / name, copied / name)
+
+    def inventory():
+        result = {'.': ('directory', copied.stat().st_mode, copied.stat().st_mtime_ns)}
+        for path in sorted(copied.rglob('*')):
+            info = path.lstat()
+            result[str(path.relative_to(copied))] = (
+                'directory' if path.is_dir() else 'file', info.st_mode, info.st_mtime_ns,
+                None if path.is_dir() else sha(path.read_bytes()))
+        return result
+
+    before = inventory()
+    environment = os.environ.copy()
+    environment.pop('PYTHONDONTWRITEBYTECODE', None)
+    environment.pop('PYTHONPYCACHEPREFIX', None)
+    # Deliberately ordinary Python: no -B and no bytecode-related environment.
+    result = subprocess.run([sys.executable, str(copied / 'controlled_activation.py'), '--help'],
+                            cwd=tmp_path, env=environment, stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert '--apps-closed' in result.stdout
+    assert not list(copied.rglob('__pycache__'))
+    assert inventory() == before

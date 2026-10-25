@@ -1,8 +1,8 @@
 # Development candidate and controlled-test readiness
 
-This candidate is **0.2.4rc11.dev1**, a development test build, not a stable release. Source `__version__`, project metadata, frozen `--version`, Help and the package manifest must agree. Its release ID binds the version, exact clean source commit and bundle hash. A metadata-only relabel is refused. Approval to install/activate and the affected apps' closed state must be established by the operator; command flags attest those facts and do not create authorization or stop processes.
+This candidate is **0.2.4rc11.dev2**, a development test build, not a stable release. Source `__version__`, project metadata, frozen `--version`, Help and the package manifest must agree. Its release ID binds the version, exact clean source commit and bundle hash. A metadata-only relabel is refused. Approval to install/activate and the affected apps' closed state must be established by the operator; command flags attest those facts and do not create authorization or stop processes.
 
-The packaged `_internal/readiness_tools` folder contains standard-library operational tools. They are never run by normal player startup. Their default planning/verification actions do not activate code, launch the GUI, access a keyring, change station data or delete releases. Use a supported external Python on Linux. No network, package/model download or production interruption is part of readiness.
+The packaged `_internal/readiness_tools` folder contains standard-library operational tools. They are never run by normal player startup. Their default planning/verification actions do not activate code, launch the GUI, access a keyring, change station data or delete releases. Use a supported external Python on Linux. The control CLI disables sibling bytecode-cache writes before imports; programmatic imports should use Python -B as well to keep the verified tool folder unchanged. No network, package/model download or production interruption is part of readiness.
 
 ## Scoped RC10 hotfix verification
 

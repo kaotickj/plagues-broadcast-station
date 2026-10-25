@@ -19,6 +19,11 @@ import stat
 import subprocess
 import sys
 
+# Running the immutable helper directly must not create sibling __pycache__.
+# Set this before importing any packaged readiness-tool module, without relying
+# on callers to supply -B or environment flags.
+sys.dont_write_bytecode = True
+
 import linux_installer as installer
 import rc10_hotfix
 
