@@ -143,3 +143,21 @@ def test_local_stream_refusal_is_bounded_reconnect_and_redacts_key():
         assert errors and all(secret not in text for text in errors+messages)
         assert session._snapshot()['reconnects']==1
         assert any('Reconnecting (1/1)' in text for text in messages)
+
+
+@pytest.mark.parametrize('bitrate', [1000, 28500, 50000, 100000])
+def test_kbps_bitrate_range_and_encoder_arguments_include_youtube_displayed_value(bitrate):
+    """Argument assembly only: never start an encoder or stream."""
+    config = BroadcastConfig(mode='stream', target='rtmps://stream.example.invalid/live/DUMMY', bitrate_kbps=bitrate)
+    config.validate()
+    args = build_command(config, 12345, 12346)
+    assert args[args.index('-b:v') + 1] == f'{bitrate}k'
+    assert args[args.index('-maxrate') + 1] == f'{bitrate}k'
+    assert args[args.index('-bufsize') + 1] == f'{bitrate * 2}k'
+    assert args[-1] == config.target
+
+
+@pytest.mark.parametrize('bitrate', [299, 100001, True, '28500', 28500.0])
+def test_out_of_range_or_noninteger_bitrate_is_rejected(bitrate):
+    with pytest.raises(ValueError, match='bitrate'):
+        BroadcastConfig(mode='stream', target='rtmps://stream.example.invalid/live/DUMMY', bitrate_kbps=bitrate).validate()

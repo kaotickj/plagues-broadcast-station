@@ -145,3 +145,118 @@ def test_help_close_and_escape_keep_parent_open(qt_app, tmp_path, action):
     assert dialog.isVisible() and parent.isVisible()
     dialog.close()
     parent.close()
+
+
+def test_topics_cover_setup_broadcast_profiles_and_models_without_external_access(qt_app, tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(help_dialog.QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()))
+    dialog = help_dialog.HelpDialog(data_dir=tmp_path / 'station')
+    try:
+        for topic, expected in [('setup', 'without installing lyric models'), ('models', 'Validate and use existing models'),
+                                ('broadcast', '28,500 kbps is 28.5 Mbps'), ('profiles', 'Remember stream key in OS keyring'),
+                                ('troubleshooting', 'locked or missing keyring'), ('version', __version__)]:
+            dialog.show_topic(topic)
+            assert expected in dialog.text.toPlainText()
+        assert opened == []
+        assert not (tmp_path / 'station').exists()
+        dialog.show_topic('unknown')
+        assert dialog.topics.currentData() == 'all'
+        assert 'Running app version:' in dialog.text.toPlainText()
+    finally:
+        dialog.close()
+
+
+def test_help_search_supports_next_wrap_and_missing_results(qt_app, tmp_path):
+    dialog = help_dialog.HelpDialog(data_dir=tmp_path)
+    try:
+        dialog.show_topic('profiles')
+        dialog.find.setText('profile')
+        dialog.find_next()
+        first = dialog.text.textCursor().selectionStart()
+        assert dialog.text.textCursor().selectedText().lower() == 'profile'
+        dialog.find_next()
+        assert dialog.text.textCursor().selectionStart() > first
+        cursor = dialog.text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        dialog.text.setTextCursor(cursor)
+        dialog.find_next()
+        assert dialog.text.textCursor().selectionStart() == first
+        dialog.find.setText('NO_SUCH_TERM_IN_BUNDLED_HELP')
+        dialog.find_next()
+        assert 'No match' in dialog.search_status.text()
+        dialog.find.clear()
+        dialog.find_next()
+        assert 'Enter a word' in dialog.search_status.text()
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize('opened', [True, False])
+def test_only_explicit_help_link_opens_fixed_official_url(qt_app, tmp_path, monkeypatch, opened):
+    urls = []
+    def open_url(url):
+        urls.append(url.toString())
+        return opened
+    monkeypatch.setattr(help_dialog.QDesktopServices, 'openUrl', open_url)
+    dialog = help_dialog.HelpDialog(data_dir=tmp_path)
+    try:
+        assert urls == []
+        dialog.youtube_help.click()
+        assert urls == ['https://support.google.com/youtube/answer/2853702?hl=en']
+        assert ('Opened official' if opened else 'Could not open a browser') in dialog.search_status.text()
+    finally:
+        dialog.close()
+
+
+def test_ctrl_f_focuses_search_and_escape_preserves_parent(qt_app, tmp_path):
+    parent = QWidget()
+    dialog = help_dialog.HelpDialog(parent, data_dir=tmp_path)
+    parent.show(); dialog.show(); dialog.activateWindow(); qt_app.processEvents()
+    try:
+        dialog.text.setFocus()
+        QTest.keyClick(dialog, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        qt_app.processEvents()
+        assert dialog.find.hasFocus()
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        qt_app.processEvents()
+        assert not dialog.isVisible() and parent.isVisible()
+    finally:
+        dialog.close(); parent.close()
+
+
+def test_enter_in_search_advances_one_match_without_activating_other_actions(qt_app, tmp_path, monkeypatch):
+    urls = []
+    monkeypatch.setattr(help_dialog.QDesktopServices, 'openUrl', lambda url: urls.append(url.toString()))
+    dialog = help_dialog.HelpDialog(data_dir=tmp_path, topic='profiles')
+    try:
+        dialog.show(); dialog.activateWindow(); qt_app.processEvents()
+        dialog.find.setText('profile')
+        dialog.find.setFocus()
+        QTest.keyClick(dialog.find, Qt.Key.Key_Return)
+        qt_app.processEvents()
+        first = dialog.text.textCursor().selectionStart()
+        assert first == dialog.text.toPlainText().lower().index('profile')
+        QTest.keyClick(dialog.find, Qt.Key.Key_Return)
+        qt_app.processEvents()
+        assert dialog.text.textCursor().selectionStart() == dialog.text.toPlainText().lower().index('profile', first + 1)
+        assert dialog.isVisible() and urls == []
+    finally:
+        dialog.close()
+
+
+def test_topic_headings_in_paths_or_release_names_do_not_split_topics(qt_app, tmp_path, monkeypatch):
+    frozen_manifest(monkeypatch, tmp_path, json.dumps({
+        'schema': 1, 'app_id': 'plagues-broadcast-station', 'release': 'BASIC USE',
+    }).encode())
+    location = tmp_path / 'WEBSITE AND RADIO STORES'
+    dialog = help_dialog.HelpDialog(data_dir=location, topic='storage')
+    try:
+        assert str(location / 'session.json') in dialog.text.toPlainText()
+        assert 'Existing native JSON' in dialog.text.toPlainText()
+        dialog.show_topic('version')
+        assert 'Release ID: BASIC USE' in dialog.text.toPlainText()
+        dialog.show_topic('website')
+        assert dialog.text.toPlainText().startswith('WEBSITE AND RADIO STORES')
+        assert 'no automatic website' in dialog.text.toPlainText()
+    finally:
+        dialog.close()

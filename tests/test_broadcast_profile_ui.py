@@ -6,7 +6,9 @@ from urllib.parse import quote
 import pytest
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 os.environ.setdefault('QT_MEDIA_BACKEND','ffmpeg')
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox
+from PySide6.QtCore import QObject
+from PySide6.QtMultimedia import QMediaPlayer
 from gnb_player.app import MainWindow
 from gnb_player.broadcast import BroadcastConfig, redact
 from gnb_player.broadcast_profile import BroadcastProfileStore
@@ -14,14 +16,23 @@ from gnb_player.extraction import ExtractionConfig
 from test_broadcast_profile import FakeCredentials, profile
 
 
+class NoDeviceAudioOutput(QObject):
+    """GUI profile tests never enumerate or connect to a real sound device."""
+    def setVolume(self,value): self._volume=value
+    def volume(self): return getattr(self,'_volume',0.0)
+
+
 @pytest.fixture
 def desk(tmp_path,monkeypatch):
+    monkeypatch.setattr('gnb_player.playback.QAudioOutput',NoDeviceAudioOutput)
+    monkeypatch.setattr(QMediaPlayer,'setAudioOutput',lambda *args:None)
     monkeypatch.setattr('gnb_player.app.discover_config',lambda:ExtractionConfig())
     monkeypatch.setattr('gnb_player.app.resolve_existing_models',lambda config:(config,{
         'fields':{},'notes':[],'effective_model_paths':{},'resolved_values':{}}))
     monkeypatch.setattr('gnb_player.app.config_status',lambda config:{
         'ready':False,'missing_models':[],'python_available':False,
         'ffmpeg_available':True,'ffprobe_available':True})
+    monkeypatch.setattr(QMessageBox,'question',lambda *args,**kwargs:QMessageBox.StandardButton.Yes)
     # No model discovery, home/cache inspection, real credential classes or output.
     app=QApplication.instance() or QApplication([])
     backend=FakeCredentials(); data=tmp_path/'isolated state with spaces'
@@ -38,6 +49,7 @@ def fill(window,value=None):
     value=value or profile()
     window.output_mode.setCurrentIndex(1);window.destination.setText(value.destination);window.stream_key.setText(value.stream_key)
     window.resolution.setCurrentIndex(value.picture_index);window.bitrate.setValue(value.bitrate_kbps)
+    window.remember_stream_key.setChecked(True)
 
 
 def test_explicit_save_clear_restore_forget_and_no_auto_start(desk,monkeypatch):
@@ -45,14 +57,14 @@ def test_explicit_save_clear_restore_forget_and_no_auto_start(desk,monkeypatch):
     starts=[];monkeypatch.setattr(window.export,'start',lambda config:starts.append(config))
     assert not backend.calls and window.stream_key.echoMode()==QLineEdit.EchoMode.Password
     fill(window);window.save_stream_button.click()
-    assert 'Saved securely' in window.stream_profile_status.text()
+    assert 'saved securely' in window.stream_profile_status.text()
     window.clear_stream_button.click()
     assert not window.stream_key.text() and store.marker.exists()
     window.restore_stream_button.click()
     assert window.destination.text()==profile().destination and window.stream_key.text()==profile().stream_key
     assert window.resolution.currentIndex()==1 and window.bitrate.value()==6500 and not starts
     window.forget_stream_button.click()
-    assert 'Forgot both' in window.stream_profile_status.text()
+    assert 'Forgot saved' in window.stream_profile_status.text()
     assert not store.marker.exists() and not backend.values and not window.stream_key.text() and not window.destination.text()
 
 
@@ -63,7 +75,7 @@ def test_restart_restores_only_saved_active_profile(desk,monkeypatch):
     monkeypatch.setattr(MainWindow,'_task',lambda self,fn,done:done(fn()))
     restored=MainWindow(window.data_dir,credential_store=BroadcastProfileStore(window.data_dir,backend_factory=lambda:backend))
     assert restored.stream_key.text()==profile().stream_key and restored.output_mode.currentIndex()==1
-    assert not restored.export.running and 'Restored securely' in restored.stream_profile_status.text()
+    assert not restored.export.running and 'Saved profile loaded' in restored.stream_profile_status.text()
     restored._closing=True;restored.close()
     monkeypatch.setattr(MainWindow,'_task',original_task)
 
@@ -72,7 +84,7 @@ def test_failed_update_and_forget_keep_honest_status_and_session_fields(desk):
     window,backend,store=desk
     fill(window);window.save_stream_profile();old=store.marker.read_bytes()
     window.stream_key.setText('REPLACEMENT');backend.fail='set';window.save_stream_profile()
-    assert 'Saved securely' not in window.stream_profile_status.text()
+    assert 'saved securely' not in window.stream_profile_status.text()
     assert 'session-only' in window.stream_profile_status.text() and store.marker.read_bytes()==old
     assert window.stream_key.text()=='REPLACEMENT'
     backend.fail='delete';window.forget_stream_profile()

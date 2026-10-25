@@ -131,6 +131,10 @@ def save_through_gui(window):
 
 def type_path(window, field, value):
     scroll = show_models(window)
+    if not window.advanced_model_toggle.isChecked():
+        scroll.ensureWidgetVisible(window.advanced_model_toggle)
+        QTest.keyClick(window.advanced_model_toggle, Qt.Key.Key_Space)
+        QApplication.processEvents()
     entry = window.model_fields[field]
     scroll.ensureWidgetVisible(entry)
     QApplication.processEvents()
@@ -161,7 +165,13 @@ def test_shared_resolution_is_visible_without_populating_component_overrides(sta
     scroll = show_models(window)
     QTest.qWait(60)
     QApplication.processEvents()
+    assert window.advanced_model_options.isHidden()
+    scroll.ensureWidgetVisible(window.advanced_model_toggle)
+    QTest.keyClick(window.advanced_model_toggle, Qt.Key.Key_Space)
+    QApplication.processEvents()
     runtime = window.model_fields['python_path']
+    scroll.ensureWidgetVisible(runtime)
+    QApplication.processEvents()
     runtime_rect = runtime.rect().translated(runtime.mapTo(scroll.viewport(), QPoint()))
     assert scroll.viewport().rect().contains(runtime_rect)
     assert window.extract_config.cache_dir == str(window.data_dir / 'lyrics-cache')

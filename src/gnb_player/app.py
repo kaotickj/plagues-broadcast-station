@@ -83,6 +83,9 @@ class MainWindow(QMainWindow):
         self.data_dir = Path(data_dir); self.data_dir.mkdir(parents=True, exist_ok=True)
         self.credential_store = credential_store or BroadcastProfileStore(self.data_dir)
         self._profile_busy = False
+        self._saved_stream_snapshot = None
+        self._output_destination_mode = 0
+        self._output_destinations = {0: '', 1: ''}
         self.settings_file = self.data_dir/'settings.json'
         try: self.saved = json.loads(self.settings_file.read_text())
         except (OSError, ValueError): self.saved = {}
@@ -137,7 +140,7 @@ class MainWindow(QMainWindow):
             try: self.load_profile(start)
             except Exception as error: self._message(f'Could not open playlist: {error}')
         self._message('Ready. Play a track, then show Program Output or start a local recording.')
-        if self.credential_store.marker.exists():self.restore_stream_profile()
+        if self.credential_store.settings_file.exists() or self.credential_store.marker.exists():self.restore_stream_profile(confirm=False)
 
     def _button(self, label, slot, primary=False):
         button = QPushButton(label); button.clicked.connect(slot)
@@ -245,30 +248,95 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(page,'Lyrics')
 
     def _broadcast_tab(self):
-        page=QWidget(); v=QVBoxLayout(page); form=QFormLayout()
-        self.output_mode=QComboBox(); self.output_mode.addItems(['Local recording','Direct livestream (RTMP / RTMPS)']); form.addRow('Output',self.output_mode)
-        self.resolution=QComboBox(); self.resolution.addItems(['1280 × 720 · 30 fps','1920 × 1080 · 30 fps']); form.addRow('Picture size',self.resolution)
-        self.bitrate=QSpinBox(); self.bitrate.setRange(1000,18000); self.bitrate.setValue(4500); self.bitrate.setSuffix(' kbps'); form.addRow('Video bitrate',self.bitrate)
-        self.destination=QLineEdit(); self.destination.setPlaceholderText('Recording file, or rtmps://server/application'); self.destination.setAccessibleName('Recording path or streaming server'); form.addRow('Destination',self.destination)
-        self.stream_key=QLineEdit(); self.stream_key.setEchoMode(QLineEdit.EchoMode.Password); self.stream_key.setPlaceholderText('Save securely with Save/update'); self.stream_key.setAccessibleName('Private stream key. Masked; saved only in native protected credentials.'); form.addRow('Stream key',self.stream_key)
-        v.addLayout(form)
-        row=QHBoxLayout(); self.save_stream_button=self._button('Save/update',self.save_stream_profile); row.addWidget(self.save_stream_button)
-        self.restore_stream_button=self._button('Restore saved',self.restore_stream_profile); row.addWidget(self.restore_stream_button)
+        page=QWidget(); outer=QVBoxLayout(page)
+        self.broadcast_preview_toggle=QCheckBox('Show preview and playback above broadcast controls')
+        self.broadcast_preview_toggle.setAccessibleName('Show preview and playback above broadcast controls')
+        self.broadcast_preview_toggle.setToolTip('Use the full Broadcast workspace for settings, or show the operator preview and transport. Program Output is unchanged.')
+        self.broadcast_preview_toggle.toggled.connect(lambda _:self._operator_tab_changed(self.tabs.currentIndex()))
+        outer.addWidget(self.broadcast_preview_toggle)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body=QWidget(); v=QVBoxLayout(body); v.setContentsMargins(0,0,8,0)
+        destination_group=QGroupBox('1 · Output destination'); form=QFormLayout(destination_group)
+        self.output_mode=QComboBox(); self.output_mode.addItems(['Local recording','Direct livestream (RTMP / RTMPS)'])
+        self.output_mode.setAccessibleName('Output type'); form.addRow('&Output',self.output_mode)
+        self.destination=QLineEdit(); self.destination.setAccessibleName('Recording path or streaming server')
+        self.destination.setMaxLength(8192); form.addRow('&Destination',self.destination)
+        self.choose_recording_button=self._button('Choose recording &file…',self.choose_recording); form.addRow(self.choose_recording_button)
+        self.stream_key=QLineEdit(); self.stream_key.setEchoMode(QLineEdit.EchoMode.Password); self.stream_key.setMaxLength(8192)
+        self.stream_key.setPlaceholderText('Paste the private key; session-only unless remembered')
+        self.stream_key.setAccessibleName('Private stream key. Masked; never saved in playlists.')
+        form.addRow('Stream &key',self.stream_key)
+        self.remember_stream_key=QCheckBox('&Remember stream key in OS keyring')
+        self.remember_stream_key.setAccessibleName('Remember stream key in OS keyring')
+        self.remember_stream_key.setToolTip('Opt in before Save profile. Uses Windows Credential Manager or Linux Secret Service. Unchecked saves only ordinary settings; Forget saved removes earlier protected copies.')
+        form.addRow(self.remember_stream_key)
+        self.destination_hint=QLabel(); self.destination_hint.setWordWrap(True); self.destination_hint.setTextFormat(Qt.TextFormat.PlainText); form.addRow(self.destination_hint)
+        v.addWidget(destination_group)
+
+        quality_group=QGroupBox('2 · Picture quality'); quality=QFormLayout(quality_group)
+        self.quality_preset=QComboBox(); self.quality_preset.setAccessibleName('Picture quality preset')
+        self.quality_preset.addItem('Custom · keep current values',None)
+        self.quality_preset.addItem('YouTube H.264 · 720p / 30 fps · 8,000 kbps',(0,8000))
+        self.quality_preset.addItem('YouTube H.264 · 1080p / 30 fps · 14,000 kbps',(1,14000))
+        self.quality_preset.activated.connect(self._apply_quality_preset); quality.addRow('&Preset',self.quality_preset)
+        self.resolution=QComboBox(); self.resolution.addItems(['1280 × 720 · 30 fps','1920 × 1080 · 30 fps'])
+        self.resolution.setAccessibleName('Picture size and frame rate'); quality.addRow('Picture si&ze',self.resolution)
+        self.bitrate=QSpinBox(); self.bitrate.setRange(1000,100000); self.bitrate.setValue(4500); self.bitrate.setSuffix(' kbps'); self.bitrate.setSingleStep(500)
+        self.bitrate.setAccessibleName('Video bitrate in kilobits per second'); self.bitrate.setKeyboardTracking(False)
+        self.bitrate.setToolTip('1,000–100,000 kilobits per second. Type 28500 for 28.5 Mbps. A larger value needs more upload bandwidth.')
+        quality.addRow('Video &bitrate',self.bitrate)
+        self.bitrate_hint=QLabel(); self.bitrate_hint.setWordWrap(True); quality.addRow(self.bitrate_hint)
+        v.addWidget(quality_group)
+
+        profile_group=QGroupBox('3 · Saved stream profile · this computer'); profile_layout=QVBoxLayout(profile_group)
+        note=QLabel('Save the server URL, picture size and bitrate here. Save playlist keeps songs and appearance separately. Keys require the remember option above.')
+        note.setWordWrap(True); profile_layout.addWidget(note)
+        row=QHBoxLayout(); self.save_stream_button=self._button('&Save profile',self.save_stream_profile); row.addWidget(self.save_stream_button)
+        self.restore_stream_button=self._button('Re&load saved',self.restore_stream_profile); row.addWidget(self.restore_stream_button)
         self.forget_stream_button=self._button('Forget saved',self.forget_stream_profile); row.addWidget(self.forget_stream_button)
-        self.clear_stream_button=self._button('Clear fields',self.clear_stream_fields); row.addWidget(self.clear_stream_button); v.addLayout(row)
-        self.stream_profile_status=QLabel('Session-only fields. Save/update securely remembers a direct livestream on this computer.'); self.stream_profile_status.setWordWrap(True); self.stream_profile_status.setTextFormat(Qt.TextFormat.PlainText); self.stream_profile_status.setAccessibleName('Protected streaming profile status'); v.addWidget(self.stream_profile_status)
+        self.clear_stream_button=self._button('Clear fields',self.clear_stream_fields); row.addWidget(self.clear_stream_button); outer.addLayout(row)
+        self.stream_profile_status=QLabel('Not saved · choose Direct livestream to create a profile.'); self.stream_profile_status.setWordWrap(True)
+        self.stream_profile_status.setTextFormat(Qt.TextFormat.PlainText); self.stream_profile_status.setAccessibleName('Stream profile saved or unsaved status'); outer.addWidget(self.stream_profile_status)
+        self.broadcast_help_button=self._button('Broadcast &help',lambda:self._show_help_topic('broadcast')); profile_layout.addWidget(self.broadcast_help_button)
+        v.addWidget(profile_group); v.addStretch(); scroll.setWidget(body); outer.insertWidget(1,scroll,1)
         for field in (self.destination,self.stream_key):field.textChanged.connect(self._stream_fields_changed)
-        self.output_mode.currentIndexChanged.connect(self._stream_fields_changed); self.resolution.currentIndexChanged.connect(self._stream_fields_changed); self.bitrate.valueChanged.connect(self._stream_fields_changed)
-        row=QHBoxLayout(); self.choose_recording_button=self._button('Choose recording file',self.choose_recording); row.addWidget(self.choose_recording_button); self.start_output=self._button('Start output',self.start_broadcast,True); row.addWidget(self.start_output); self.stop_output=self._button('Stop output',self.stop_broadcast); self.stop_output.setEnabled(False); row.addWidget(self.stop_output)
-        self.copy_output_diagnostics_button=self._button('Copy diagnostics',self.copy_output_diagnostics); row.addWidget(self.copy_output_diagnostics_button); v.addLayout(row)
-        self.broadcast_label=QLabel('Offline · Program Output is ready for OBS capture.'); self.broadcast_label.setWordWrap(True); self.broadcast_label.setAccessibleName('Output status'); v.addWidget(self.broadcast_label)
-        self.broadcast_stats=QLabel(''); self.broadcast_stats.setWordWrap(True); v.addWidget(self.broadcast_stats)
-        volume=QHBoxLayout(); volume.addWidget(QLabel('Monitor volume')); self.volume=QSlider(Qt.Orientation.Horizontal); self.volume.setRange(0,100); self.volume.setValue(70); self.volume.setAccessibleName('Local monitoring volume. Streaming audio level is unchanged.'); self.volume.valueChanged.connect(lambda n:self.engine.set_volume(n/100)); volume.addWidget(self.volume); v.addLayout(volume)
-        tip=QLabel('Direct output includes only this program picture and its music—no microphone or other desktop sounds. For OBS, capture the Program Output window and this app’s audio. Prepare lyrics before starting an output.'); tip.setWordWrap(True); tip.setObjectName('muted'); v.addWidget(tip); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Broadcast')
+        self.output_mode.currentIndexChanged.connect(self._output_mode_changed)
+        self.resolution.currentIndexChanged.connect(self._stream_fields_changed); self.bitrate.valueChanged.connect(self._stream_fields_changed)
+        self.remember_stream_key.toggled.connect(self._stream_fields_changed)
+        self.stream_save_shortcut=QShortcut(QKeySequence.StandardKey.Save,page); self.stream_save_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); self.stream_save_shortcut.activated.connect(self.save_stream_profile)
+        row=QHBoxLayout(); self.start_output=self._button('Start recording',self.start_broadcast,True); row.addWidget(self.start_output)
+        self.stop_output=self._button('Stop output',self.stop_broadcast); self.stop_output.setEnabled(False); row.addWidget(self.stop_output)
+        self.copy_output_diagnostics_button=self._button('Copy diagnostics',self.copy_output_diagnostics); row.addWidget(self.copy_output_diagnostics_button); outer.addLayout(row)
+        self.broadcast_label=QLabel('Offline · Program Output is ready for OBS capture.'); self.broadcast_label.setWordWrap(True); self.broadcast_label.setAccessibleName('Output status'); outer.addWidget(self.broadcast_label)
+        self.broadcast_stats=QLabel(''); self.broadcast_stats.setWordWrap(True); outer.addWidget(self.broadcast_stats)
+        volume=QHBoxLayout(); volume.addWidget(QLabel('Monitor volume')); self.volume=QSlider(Qt.Orientation.Horizontal); self.volume.setRange(0,100); self.volume.setValue(70)
+        self.volume.setAccessibleName('Local monitoring volume. Streaming audio level is unchanged.'); self.volume.valueChanged.connect(lambda n:self.engine.set_volume(n/100)); volume.addWidget(self.volume); outer.addLayout(volume)
+        self.tabs.addTab(page,'Broadcast'); self._output_mode_changed(0)
+
+    def _show_help_topic(self,topic):
+        self._show_help()
+        self._help_dialog.show_topic(topic)
+
+    def _apply_quality_preset(self,index):
+        preset=self.quality_preset.itemData(index)
+        if preset is not None:
+            self.resolution.setCurrentIndex(preset[0]); self.bitrate.setValue(preset[1])
+
+    def _output_mode_changed(self,index):
+        self._output_destinations[self._output_destination_mode]=self.destination.text()
+        self._output_destination_mode=index
+        self.destination.setText(self._output_destinations[index])
+        self.destination.setPlaceholderText('New .mp4 or .mkv file' if index==0 else 'rtmps://server/application (key goes below)')
+        self.destination.setEchoMode(QLineEdit.EchoMode.Normal if index==0 else QLineEdit.EchoMode.Password)
+        self.start_output.setText('Start recording' if index==0 else 'Start livestream')
+        self.destination_hint.setText('Choose a new file; existing recordings are never overwritten. Only the program picture and this app’s music are recorded.' if index==0 else 'Enter the server URL and key separately. Nothing starts when you save. For OBS, capture Program Output and this app’s audio instead.')
+        self._profile_controls(); self._stream_fields_changed()
 
     def _models_tab(self):
         page=QWidget(); v=QVBoxLayout(page); form=QFormLayout(); self.model_fields={}
-        v.addWidget(self._button('Set up / find models',self.open_model_setup,True))
+        note=QLabel('Playback and broadcasting work without AI models. For automatic lyrics, start with Set up / find models; existing compatible models can be reused.')
+        note.setWordWrap(True); v.addWidget(note)
+        actions=QHBoxLayout(); actions.addWidget(self._button('Set up / find models',self.open_model_setup,True)); actions.addWidget(self._button('Model help',lambda:self._show_help_topic('models'))); v.addLayout(actions)
         self.gpu=QCheckBox('Use GPU when available; wait while another job uses it'); self.gpu.setChecked(self.extract_config.use_gpu); self.gpu.setAccessibleName('Use GPU when available'); v.addWidget(self.gpu)
         self.processing_status=QLabel(); self.processing_status.setWordWrap(True); self.processing_status.setTextFormat(Qt.TextFormat.PlainText); self.processing_status.setAccessibleName('Configured processing backends'); v.addWidget(self.processing_status)
         self.separate_vocals=QCheckBox('Separate vocals before recognition')
@@ -289,7 +357,9 @@ class MainWindow(QMainWindow):
             if key in self.model_fields:self.model_fields[key].textEdited.connect(lambda _,key=key:self._edited_model_paths.add(key))
         self.model_fields['recognition_prompt'].setToolTip('Optional context can bias recognition. Leave empty to avoid introducing words; recording filenames are never used as prompts.')
         self.model_fields['recognition_language'].setToolTip('Use en for English, auto for language detection, or a supported language code. English-only models retain English.')
-        v.addLayout(form)
+        self.advanced_model_options=QWidget(); advanced_layout=QVBoxLayout(self.advanced_model_options); advanced_layout.setContentsMargins(0,0,0,0); advanced_layout.addLayout(form)
+        self.advanced_model_toggle=QCheckBox('Show advanced paths and recognition settings'); self.advanced_model_toggle.setAccessibleName('Show advanced paths and recognition settings'); self.advanced_model_toggle.toggled.connect(self.advanced_model_options.setVisible)
+        v.addWidget(self.advanced_model_toggle); v.addWidget(self.advanced_model_options); self.advanced_model_options.hide()
         v.addWidget(self._button('Save model settings',self.save_model_settings)); self.model_status=QLabel(''); self.model_status.setWordWrap(True); v.addWidget(self.model_status)
         note=QLabel('Playback does not require AI models. Extraction uses a separate local Python runtime so heavy work stays outside the player. Configure your installed runtime and models here; local settings are restored on later launches.'); note.setWordWrap(True); note.setObjectName('muted'); v.addWidget(note); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Lyric models'); self.update_model_status()
 
@@ -505,7 +575,7 @@ class MainWindow(QMainWindow):
         # while reviewing. The separate Program Output keeps its normal size.
         self.preview.setMinimumHeight(100 if index in (1,2) else 270)
         self.preview.setMaximumHeight(140 if index in (1,2) else 340)
-        self.monitor_panel.setVisible(not (index==1 and self._expanded_lyrics))
+        self.monitor_panel.setVisible(not ((index==1 and self._expanded_lyrics) or (index==2 and not self.broadcast_preview_toggle.isChecked())))
 
     def _toggle_expanded_lyrics(self,checked=False):
         # Keep the same editor/delegate alive so in-progress text, selection and
@@ -1048,57 +1118,132 @@ class MainWindow(QMainWindow):
         if not status['ffprobe_available']:messages.append('FFprobe is missing from the application environment.')
         self.model_status.setText('\n'.join(messages))
 
+    def _stream_snapshot(self):
+        destination=self.destination.text() if self.output_mode.currentIndex()==1 else self._output_destinations[1]
+        return (destination.strip(),self.stream_key.text().strip(),self.resolution.currentIndex(),self.bitrate.value(),self.remember_stream_key.isChecked())
+
     def _stream_fields_changed(self, *_):
-        if not self._profile_busy:self.stream_profile_status.setText('Current fields are session-only until Save/update. Clear fields does not forget a saved profile.')
+        bitrate=self.bitrate.value()
+        self.bitrate_hint.setText(f'{bitrate / 1000:g} Mbps · 28,500 kbps = 28.5 Mbps. Match your service, resolution, frame rate and upload capacity; higher is not always better.')
+        match=next((i for i in range(1,self.quality_preset.count()) if self.quality_preset.itemData(i)==(self.resolution.currentIndex(),bitrate)),0)
+        self.quality_preset.setCurrentIndex(match)
+        if not self._profile_busy:
+            saved=self._saved_stream_snapshot is not None and self._stream_snapshot()==self._saved_stream_snapshot
+            self.stream_profile_status.setText('Saved · matches the last saved profile. Start output is always explicit.' if saved else 'Unsaved changes · Save profile keeps stream settings on this computer (Ctrl+S on this tab).')
 
     def _profile_controls(self):
         enabled=not self._profile_busy and not self.export.running
-        for widget in (self.save_stream_button,self.restore_stream_button,self.forget_stream_button,self.clear_stream_button,
-                       self.output_mode,self.destination,self.stream_key,self.resolution,self.bitrate,self.choose_recording_button):widget.setEnabled(enabled)
+        streaming=self.output_mode.currentIndex()==1
+        for widget in (self.restore_stream_button,self.forget_stream_button,self.clear_stream_button,
+                       self.output_mode,self.destination,self.resolution,self.bitrate,self.quality_preset):widget.setEnabled(enabled)
+        self.save_stream_button.setEnabled(enabled and streaming)
+        for widget in (self.stream_key,self.remember_stream_key):widget.setEnabled(enabled and streaming)
+        self.choose_recording_button.setEnabled(enabled and not streaming)
+        self.choose_recording_button.setVisible(not streaming)
         self.start_output.setEnabled(enabled)
 
     def _profile_operation(self, action, profile=None):
         if self._profile_busy or self.export.running:
-            self.stream_profile_status.setText('Stop output and wait for the current profile operation before changing saved credentials.'); return
+            self.stream_profile_status.setText('Stop output and wait for the current profile operation before changing saved settings.'); return
         self._profile_busy=True; self._profile_controls()
-        self.stream_profile_status.setText('Waiting for protected credential storage… Unlock your desktop keyring if prompted.')
+        remember=self.remember_stream_key.isChecked()
+        snapshot=self._stream_snapshot()
+        self.stream_profile_status.setText('Saving profile…' if action=='save' else 'Loading saved profile…' if action=='restore' else 'Forgetting saved profile…')
         def work():
             try:
-                if action=='save':self.credential_store.save(profile); return True,None
-                if action=='restore':return True,self.credential_store.load()
-                self.credential_store.forget(); return True,None
+                with self.credential_store.transaction():
+                    if action=='save':
+                        warning=''
+                        if remember:
+                            self._protected_profile_may_exist=True
+                            try:self.credential_store.save(profile)
+                            except ProfileError as error:warning=str(error)
+                        from .broadcast_profile import public_destination
+                        if warning and not public_destination(profile.destination):
+                            return False,warning+' The complete target was not written to ordinary settings; fields remain session-only.'
+                        try:self.credential_store.save_settings(profile,remember=remember and not warning)
+                        except ProfileError as error:
+                            if remember and not warning:raise ProfileError('Protected profile saved, but ordinary settings did not finish. Retry Save profile. '+str(error)) from None
+                            raise
+                        return True,{'warning':warning,'remember':remember and not warning}
+                    if action=='restore':
+                        ordinary=self.credential_store.load_settings()
+                        value=ordinary.profile if ordinary else None
+                        protected=ordinary.remember if ordinary else self.credential_store.marker.exists()
+                        warning=''
+                        if protected:
+                            try:
+                                restored=self.credential_store.load()
+                                if restored is None:warning='The remembered key is unavailable. Re-enter it and Save profile to remember it again.'
+                                else:value=restored
+                            except ProfileError as error:warning=str(error)
+                        return True,{'profile':value,'remember':protected,'warning':warning}
+                    if self.credential_store.marker.exists() or self.credential_store.protected_attempt_file.exists() or getattr(self,'_protected_profile_may_exist',False):self.credential_store.forget()
+                    self.credential_store.forget_settings()
+                    return True,None
             except ProfileError as error:return False,str(error)
-            except Exception:return False,'Protected credential storage could not finish. Current fields remain session-only; retry Save/update or Forget.'
+            except Exception:return False,'Profile storage could not finish. Current fields are kept; retry Save profile, Reload saved or Forget saved.'
         def finished(result):
             ok,value=result
-            if ok and action=='restore' and value is not None:
-                self.output_mode.setCurrentIndex(1); self.destination.setText(value.destination); self.stream_key.setText(value.stream_key)
-                self.resolution.setCurrentIndex(value.picture_index); self.bitrate.setValue(value.bitrate_kbps)
+            if ok and action=='restore' and value['profile'] is not None:
+                loaded=value['profile']
+                self.output_mode.setCurrentIndex(1); self.destination.setText(loaded.destination); self.stream_key.setText(loaded.stream_key)
+                self.remember_stream_key.setChecked(value['remember'])
+                self.resolution.setCurrentIndex(loaded.picture_index); self.bitrate.setValue(loaded.bitrate_kbps)
+                self._saved_stream_snapshot=self._stream_snapshot() if not value['warning'] else None
+            if ok and action=='save':
+                self._saved_stream_snapshot=snapshot if not value['warning'] else None
             if ok and action=='forget':
-                self.stream_key.clear()
+                self._saved_stream_snapshot=None; self._protected_profile_may_exist=False
+                self.stream_key.clear(); self.remember_stream_key.setChecked(False); self._output_destinations[1]=''
                 if self.output_mode.currentIndex()==1:self.destination.clear()
             self._profile_busy=False; self._profile_controls()
-            if not ok:self.stream_profile_status.setText(value)
-            elif action=='save':self.stream_profile_status.setText('Saved securely on this computer for this data folder. Restores next launch; Start output is always explicit.')
-            elif action=='forget':self.stream_profile_status.setText('Forgot both protected copies and cleared the saved reference. Streaming fields cleared.')
-            elif value is None:self.stream_profile_status.setText('No saved profile for this data folder. Current fields remain session-only.')
-            else:self.stream_profile_status.setText('Restored securely. Check the destination and press Start output when ready.')
+            if not ok:self.stream_profile_status.setText('Not saved · '+value)
+            elif action=='forget':self.stream_profile_status.setText('Forgot saved settings and any protected copies. Streaming fields cleared.')
+            elif value.get('warning'):
+                prefix='Ordinary settings saved; key was not remembered. ' if action=='save' else 'Loaded ordinary settings; remembered key unavailable. '
+                self.stream_profile_status.setText(prefix+value['warning'])
+            elif action=='save':
+                self.stream_profile_status.setText('Saved · server, picture size and bitrate. '+('Stream key and full target saved securely in the OS keyring.' if value['remember'] else 'Stream key remains session-only; earlier protected copies are removed only by Forget saved.'))
+            elif value['profile'] is None:self.stream_profile_status.setText('No saved profile. Current fields are kept.')
+            else:self.stream_profile_status.setText('Saved profile loaded · '+('key restored securely. ' if value['remember'] else 'enter the session-only key before streaming. ')+'Start output is always explicit.')
         self._task(work,finished)
 
     def save_stream_profile(self):
         if self.output_mode.currentIndex()!=1:
             self.stream_profile_status.setText('Choose Direct livestream to save a streaming profile. Recording filenames are not saved here.'); return
+        if not self.destination.hasAcceptableInput() or not self.bitrate.hasAcceptableInput():
+            self.stream_profile_status.setText('Not saved · enter a video bitrate from 1,000 to 100,000 kbps.'); self.bitrate.setFocus(); return
+        self.bitrate.interpretText()
         profile=StreamProfile(self.destination.text().strip(),self.stream_key.text().strip(),self.resolution.currentIndex(),self.bitrate.value())
-        try:profile.validate()
-        except ProfileError as error:self.stream_profile_status.setText(str(error)); return
+        try:
+            profile.validate()
+            if not self.remember_stream_key.isChecked():
+                from .broadcast_profile import public_destination
+                if not public_destination(profile.destination):
+                    raise ProfileError('Use a public server with /live, /live2, /app or /application and a separate key. Custom paths and private targets require Remember stream key for protected saving.')
+        except ProfileError as error:
+            self.stream_profile_status.setText('Not saved · '+str(error)); self.destination.setFocus(); return
         self._profile_operation('save',profile)
 
-    def restore_stream_profile(self):self._profile_operation('restore')
-    def forget_stream_profile(self):self._profile_operation('forget')
+    def _confirm_profile_replace(self,action):
+        if not any(self._stream_snapshot()[:2]) or self._stream_snapshot()==self._saved_stream_snapshot:return True
+        return QMessageBox.question(self,action+'?',action+' will replace unsaved stream fields. Continue?',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Cancel)==QMessageBox.StandardButton.Yes
+
+    def restore_stream_profile(self,checked=False,*,confirm=True):
+        if self._profile_busy or self.export.running:return
+        if confirm and not self._confirm_profile_replace('Reload saved profile'):return
+        self._profile_operation('restore')
+
+    def forget_stream_profile(self):
+        if self._profile_busy or self.export.running:return
+        answer=QMessageBox.question(self,'Forget saved profile?','Remove this computer’s saved stream settings and any remembered key? Current streaming fields will be cleared.',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Cancel)
+        if answer==QMessageBox.StandardButton.Yes:self._profile_operation('forget')
+
     def clear_stream_fields(self):
         if self._profile_busy or self.export.running:return
         self.destination.clear(); self.stream_key.clear()
-        self.stream_profile_status.setText('Cleared this session’s fields. A saved protected profile is still available through Restore saved.')
+        self.stream_profile_status.setText('Unsaved changes · cleared this session’s fields. Reload saved restores the saved profile.')
 
     def _redact_broadcast(self, message):
         from .broadcast import redact
@@ -1115,9 +1260,12 @@ class MainWindow(QMainWindow):
 
     def choose_recording(self):
         name,_=QFileDialog.getSaveFileName(self,'Save local broadcast recording',str(Path.home()/'broadcast.mp4'),'MP4 recording (*.mp4);;Matroska recording (*.mkv)')
-        if name:self.destination.setText(name); self.output_mode.setCurrentIndex(0)
+        if name:self.output_mode.setCurrentIndex(0); self.destination.setText(name)
     def start_broadcast(self):
         self._broadcast_failure=''
+        if not self.bitrate.hasAcceptableInput():
+            self._broadcast_error('Enter a video bitrate from 1,000 to 100,000 kbps before starting output.'); self.bitrate.setFocus(); return
+        self.bitrate.interpretText()
         self._output_diagnostic({'event':'ui_start_attempt','mode':'stream' if self.output_mode.currentIndex()==1 else 'record'})
         if self._profile_busy:self._broadcast_error('Wait for the protected profile operation before starting output.'); return
         if self.extract_process.state()!=QProcess.ProcessState.NotRunning:self._broadcast_error('Finish or cancel lyric extraction before starting output.'); return

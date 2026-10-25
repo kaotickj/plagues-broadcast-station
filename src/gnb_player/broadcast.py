@@ -29,6 +29,8 @@ AUDIO_SAMPLE_BYTES = 4
 AUDIO_FRAME_BYTES = AUDIO_CHANNELS * AUDIO_SAMPLE_BYTES
 AUDIO_CHUNK_FRAMES = 960  # 20ms, paced against the same clock as video.
 MAX_AUDIO_BYTES = AUDIO_RATE * AUDIO_FRAME_BYTES * 2
+MIN_VIDEO_BITRATE_KBPS = 300
+MAX_VIDEO_BITRATE_KBPS = 100000
 
 
 @dataclass(frozen=True)
@@ -50,8 +52,8 @@ class BroadcastConfig:
             raise ValueError("Choose even video dimensions between 320×180 and 3840×2160.")
         if not isinstance(self.fps, int) or not 10 <= self.fps <= 60:
             raise ValueError("Choose a video frame rate from 10 to 60 fps.")
-        if not isinstance(self.bitrate_kbps, int) or not 300 <= self.bitrate_kbps <= 50000:
-            raise ValueError("Choose a video bitrate from 300 to 50000 kbps.")
+        if type(self.bitrate_kbps) is not int or not MIN_VIDEO_BITRATE_KBPS <= self.bitrate_kbps <= MAX_VIDEO_BITRATE_KBPS:
+            raise ValueError("Choose a video bitrate from 300 to 100000 kbps (100 Mbps).")
         if not isinstance(self.target, str) or not self.target.strip() or any(ord(c) < 32 for c in self.target):
             raise ValueError("Choose a valid recording filename or streaming destination.")
         if self.mode == "record":

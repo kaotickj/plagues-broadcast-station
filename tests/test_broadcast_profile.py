@@ -297,3 +297,152 @@ def test_real_winvault_backend_with_fake_native_api_refuses_stale_compound_copy(
     saved.forget()
     assert other.load().stream_key=='OTHER'
     assert not any(saved._account in target for target in api.values)
+
+
+@pytest.mark.parametrize('bitrate', [1000, 28500, 50000, 100000])
+def test_full_protected_profile_roundtrips_extended_bitrate_range(store, bitrate):
+    saved, _ = store
+    value = StreamProfile('rtmps://protected.example.invalid/app/DUMMY-INLINE', 'DUMMY-KEY', 0, bitrate)
+    saved.save(value)
+    assert saved.load() == value
+
+
+@pytest.mark.parametrize('bitrate', [999, 100001, True, '28500', 28500.0])
+def test_invalid_profile_bitrate_does_not_access_native_backend(store, bitrate):
+    saved, backend = store
+    with pytest.raises(ProfileError, match='bitrate'):
+        saved.save(StreamProfile('rtmps://stream.example.invalid/live', 'DUMMY', 0, bitrate))
+    assert backend.calls == []
+
+
+def test_transaction_prevents_two_window_interleaving_between_protected_and_ordinary_saves(store):
+    saved, backend = store
+    other = BroadcastProfileStore(saved.data_dir, backend_factory=lambda: backend)
+    value = StreamProfile('rtmps://stream.example.invalid/live', 'DUMMY-A', 1, 28500)
+    with saved.transaction():
+        saved.save(value)
+        # A second window must not replace credentials before the first window
+        # commits its matching ordinary settings selection.
+        with pytest.raises(ProfileError, match='progress'):
+            with other.transaction():
+                other.save(StreamProfile('rtmps://stream.example.invalid/app', 'DUMMY-B', 0, 4500))
+        saved.save_settings(value, remember=True)
+        assert saved.load() == value
+        assert saved.load_settings().profile.bitrate_kbps == value.bitrate_kbps
+    with other.transaction():
+        assert other.load() == value
+        assert other.load_settings().remember is True
+    assert (saved.data_dir / '.broadcast-profile-operation.lock').exists()
+
+
+def test_transaction_releases_after_failure_and_does_not_need_keyring(tmp_path):
+    def forbidden():
+        raise AssertionError('Outer profile transaction probed native credentials')
+    saved = BroadcastProfileStore(tmp_path, backend_factory=forbidden)
+    other = BroadcastProfileStore(tmp_path, backend_factory=forbidden)
+    with pytest.raises(RuntimeError, match='operator failure'):
+        with saved.transaction():
+            saved.save_settings(StreamProfile('rtmps://stream.example.invalid/live', '', 0, 28500))
+            raise RuntimeError('operator failure')
+    with other.transaction():
+        assert other.load_settings().profile.bitrate_kbps == 28500
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX subprocess lock, Windows branch separately mocked')
+def test_transaction_refuses_another_process_without_touching_credentials(store):
+    saved, _ = store
+    child_code = '''import sys
+from gnb_player.broadcast_profile import BroadcastProfileStore, ProfileError
+def forbidden(): raise AssertionError('native credential backend reached')
+store=BroadcastProfileStore(sys.argv[1],backend_factory=forbidden)
+try:
+ with store.transaction(): raise AssertionError('interleaving permitted')
+except ProfileError as error:
+ assert 'progress' in str(error)
+'''
+    with saved.transaction():
+        result = subprocess.run([sys.executable, '-c', child_code, str(saved.data_dir)], capture_output=True, text=True,
+                                env={**os.environ, 'PYTHONPATH':str(__import__('pathlib').Path(importlib.import_module('gnb_player').__path__[0]).parent)}, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_windows_outer_transaction_and_individual_operation_use_distinct_locks(store, monkeypatch):
+    saved, _ = store
+    calls = []
+    fake = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2,
+                           locking=lambda fd, kind, length: calls.append((fd, kind, length)))
+    monkeypatch.setitem(sys.modules, 'msvcrt', fake)
+    with patch('gnb_player.broadcast_profile.os.name', 'nt'):
+        with saved.transaction():
+            with saved._lock():
+                pass
+    outer, inner = calls[0][0], calls[1][0]
+    assert outer != inner
+    assert calls == [(outer, 1, 1), (inner, 1, 1), (inner, 2, 1), (outer, 2, 1)]
+
+
+def test_failed_first_protected_save_is_cleanup_discoverable_after_restart(store):
+    saved, backend = store
+    ordinary = StreamProfile('rtmps://stream.example.invalid/live', '', 0, 28500)
+    saved.save_settings(ordinary)
+    def fail_marker(*args):
+        raise OSError('DUMMY-PRIVATE-ERROR')
+    saved._write_marker = fail_marker
+    with pytest.raises(ProfileError):
+        saved.save(profile())
+    assert backend.values and not saved.marker.exists()
+    assert json.loads(saved.protected_attempt_file.read_text()) == {'schema': 1}
+    assert 'PRIVATE' not in saved.protected_attempt_file.read_text()
+    restarted = BroadcastProfileStore(saved.data_dir, backend_factory=lambda: backend)
+    assert restarted.load_settings().remember is False
+    assert restarted.protected_attempt_file.exists()
+    restarted.forget()
+    assert not backend.values and not restarted.protected_attempt_file.exists()
+    assert not restarted.marker.exists()
+    assert restarted.load_settings().profile == ordinary
+
+
+def test_protected_attempt_reference_stays_until_verified_forget(store):
+    saved, backend = store
+    saved.save(profile())
+    assert json.loads(saved.protected_attempt_file.read_text()) == {'schema': 1}
+    backend.fail = 'delete'
+    with pytest.raises(ProfileError):
+        saved.forget()
+    assert saved.protected_attempt_file.exists()
+    backend.fail = None
+    saved.forget()
+    assert not saved.protected_attempt_file.exists() and not backend.values
+
+
+def test_attempt_reference_cleanup_failure_reports_deleted_credentials_truthfully(store, monkeypatch):
+    saved, backend = store
+    saved.save(profile())
+    original = type(saved.protected_attempt_file).unlink
+    def fail(path, *args, **kwargs):
+        if path == saved.protected_attempt_file:
+            raise OSError('DUMMY-PRIVATE-ERROR')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(type(saved.protected_attempt_file), 'unlink', fail)
+    with pytest.raises(ProfileError) as caught:
+        saved.forget()
+    assert caught.value.credentials_deleted and not backend.values
+    assert saved.protected_attempt_file.exists() and not saved.marker.exists()
+    assert 'DUMMY-PRIVATE' not in str(caught.value)
+    monkeypatch.setattr(type(saved.protected_attempt_file), 'unlink', original)
+    saved.forget()
+    assert not saved.protected_attempt_file.exists()
+
+
+def test_failed_attempt_reference_write_never_reaches_backend(store, monkeypatch):
+    from gnb_player import broadcast_profile
+    saved, backend = store
+    original = broadcast_profile.atomic_json
+    def fail(path, payload):
+        if path == saved.protected_attempt_file:
+            raise OSError('DUMMY-PRIVATE-ERROR')
+        return original(path, payload)
+    monkeypatch.setattr(broadcast_profile, 'atomic_json', fail)
+    with pytest.raises(ProfileError):
+        saved.save(profile())
+    assert not backend.calls and not backend.values and not saved.marker.exists()

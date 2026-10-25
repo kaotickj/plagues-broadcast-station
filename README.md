@@ -28,7 +28,7 @@ A media pack is separate from the application. Extract a pack and open its `prof
 
 An on-screen waveform is a visual response to the decoded audio, not microphone input. Background videos are silent to keep the song as the soundtrack. The operator controls and local file paths are kept out of the clean program picture.
 
-See [the OBS guide](docs/OBS.md) for scene and audio setup. No livestream is started merely by opening the app. Direct streaming requires an explicit start action and a destination/key supplied by the operator. Portable playlists and settings exclude stream credentials; the optional explicit Save/update action uses native protected storage as described in [Broadcast profiles](docs/BROADCAST_PROFILE.md).
+See [the OBS guide](docs/OBS.md) for scene and audio setup. No livestream is started merely by opening the app. Direct streaming requires an explicit start action and a destination/key supplied by the operator. Portable playlists and settings exclude stream credentials; Save profile keeps ordinary stream settings, with an explicit Remember stream key option for native protected storage as described in [Broadcast profiles](docs/BROADCAST_PROFILE.md).
 
 ## Set up lyric models
 
@@ -51,7 +51,7 @@ current typed cell, then save the recording link before reporting success. Use
 **Expand editor** or drag the workspace dividers for more room. **Export lyrics…** exports a separate copy of the saved revision; save pending edits first.
 The operator window title includes the version so a stale shortcut is visible.
 Choose **Help** (F1) for running version/build details, basic usage, storage paths
-and troubleshooting; closing Help leaves the Operator Desk open.
+and troubleshooting. Topics and Ctrl+F search work offline; Broadcast help links to official YouTube encoder guidance. Closing Help leaves the Operator Desk open. Advanced model paths are behind an explicit disclosure; start with Set up / find models for guided setup.
 
 Recognition stays in transcription mode, with English as the default and no
 filename-derived prompt. Advanced recognition language and optional context are
@@ -107,6 +107,6 @@ No public broadcast is used by the tests. Source media is read-only during playb
 
 Third-party license texts, native-build version information and notices are included with the package. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including corresponding-source requirements when redistributing GPL-configured FFmpeg builds.
 
-Broadcast destinations and masked stream keys can be remembered with explicit **Save/update** in the Broadcast tab. The complete target is stored only in native protected credentials, scoped to the same OS user and data folder; no plaintext fallback or automatic streaming. See [saved livestream profiles](docs/BROADCAST_PROFILE.md) for restore, Forget and backend requirements.
+**Save profile** in Broadcast saves ordinary server/picture/bitrate settings independently of playlists and keyring availability. Masked keys require explicit **Remember stream key in OS keyring**; complete private targets use protected storage only. Bitrate accepts 1,000–100,000 kbps, including 28,500. See [saved livestream profiles](docs/BROADCAST_PROFILE.md) for saved-state feedback, reload/cancel, Forget and backend requirements.
 
 See [Save lyrics and recording identity](docs/LYRICS_STORAGE_AND_SAVE.md) for automatic storage, import provenance, conflict protection and the separate website workflow.
