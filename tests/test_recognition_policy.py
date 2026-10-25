@@ -56,7 +56,10 @@ def test_qwen_never_injects_title_and_records_explicit_settings(monkeypatch):
     assert 'PRIVATE FILE TITLE' not in json.dumps(evidence)
 
 
-def test_whisper_preserves_raw_diagnostics_and_suspect_words(monkeypatch):
+def test_whisper_preserves_raw_diagnostics_and_suspect_words(monkeypatch, tmp_path):
+    model_folder=tmp_path/'model';model_folder.mkdir()
+    (model_folder/'tokenizer.json').write_text('{}')
+    monkeypatch.setattr(pipeline,'model_path',lambda *a,**kw:model_folder)
     monkeypatch.setenv('GNB_LYRICS_LANGUAGE', 'auto')
     monkeypatch.setenv('GNB_LYRICS_TASK', 'transcribe')
     monkeypatch.setenv('GNB_LYRICS_PROMPT', 'Explicit context')
@@ -169,7 +172,8 @@ def test_high_confidence_credit_gets_fresh_review_but_is_not_deleted_on_blank_pa
     assert review.suspect_cue(data,0)
     with patch.dict(sys.modules,{'lyrics_pipeline':pipeline}):
         result=review.reconcile(data,[],{0:[]},lambda a,b:0)
-    assert result['segments']==original['segments']
+    expected=deepcopy(original['segments']);expected[0]['needs_review']=True
+    assert result['segments']==expected
     assert result['machine_review']['held_passages']
     assert not result['machine_review']['repairs']
     assert data==original

@@ -16,7 +16,9 @@ def load_backend(name):
     path = Path(worker.__file__).with_name("extraction_backend") / (name + ".py")
     spec = importlib.util.spec_from_file_location("path_test_" + name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Match the standalone worker's sibling-module import path.
+    with patch.object(sys, 'path', [str(path.parent), *sys.path]):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -113,26 +115,29 @@ def test_path_router_keeps_primary_secondary_and_large_rechecks_distinct(tmp_pat
         assert backend.model_path("large-v3") == Path(config.model_root) / "large-v3"
 
 
-def test_alignment_loader_uses_exact_preexisting_file_with_no_default_cache_lookup(tmp_path):
+def test_alignment_loader_routes_exact_file_to_local_only_tensor_loader(tmp_path):
     backend = load_backend("lyrics_pipeline")
     checkpoint = tmp_path / "separate cache/custom-name.pth"
     checkpoint.parent.mkdir()
     checkpoint.write_bytes(b"fixture")
     model = Mock()
-    model.to.return_value = model
     bundle = SimpleNamespace(get_model=Mock(return_value=model))
-    assert backend.load_alignment_model(bundle, checkpoint, "cpu") is model
-    bundle.get_model.assert_called_once_with(dl_kwargs={"model_dir": str(checkpoint.parent), "file_name": checkpoint.name})
-    model.to.assert_called_once_with("cpu")
-    bundle.get_model.reset_mock()
-    checkpoint.unlink()
-    with pytest.raises(ValueError, match="not been installed"):
-        backend.load_alignment_model(bundle, checkpoint, "cpu")
+    identity={'sha256':'fixture','local_file_only':True,'weights_only':True}
+    local = Mock(return_value=(model,identity))
+    with patch.dict(sys.modules, {'lyrics_model_io':SimpleNamespace(load_local_ctc_model=local)}):
+        assert backend.load_alignment_model(bundle, checkpoint, "cpu") is model
+        local.assert_called_once_with(bundle,checkpoint,"cpu")
+        assert model._gnb_source_identity==identity
+        local.side_effect=ValueError('missing local checkpoint')
+        checkpoint.unlink()
+        with pytest.raises(ValueError,match='missing local checkpoint'):
+            backend.load_alignment_model(bundle,checkpoint,"cpu")
     bundle.get_model.assert_not_called()
 
 
 def test_transcription_selects_existing_large_model_and_preserves_cpu_int8(tmp_path):
     chosen = tmp_path / "existing cache/large-v3"
+    chosen.mkdir(parents=True); (chosen/'tokenizer.json').write_text('{}')
     with patch.dict(os.environ, {"GNB_LYRICS_TRANSCRIPTION_ENGINE": "large-v3", "GNB_LYRICS_TRANSCRIPTION_MODEL": str(chosen)}):
         backend = load_backend("lyrics_pipeline")
         word = SimpleNamespace(word="Blues", start=0.1, end=0.8, probability=.99)
@@ -150,6 +155,8 @@ def test_transcription_selects_existing_large_model_and_preserves_cpu_int8(tmp_p
 def test_independent_review_uses_its_own_existing_model(tmp_path):
     primary = tmp_path / "primary/large-v3"
     secondary = tmp_path / "review/medium.en"
+    for folder in (primary, secondary):
+        folder.mkdir(parents=True); (folder/'tokenizer.json').write_text('{}')
     with patch.dict(os.environ, {"GNB_LYRICS_TRANSCRIPTION_ENGINE": "large-v3", "GNB_LYRICS_TRANSCRIPTION_MODEL": str(primary), "GNB_LYRICS_REVIEW_MODEL": str(secondary)}):
         backend = load_backend("lyrics_pipeline")
         review = load_backend("lyrics_review")

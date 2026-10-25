@@ -39,15 +39,50 @@ def separator_path():
     return Path(chosen) if chosen else MODELS / 'htdemucs'
 
 
+def vocal_cache_identity():
+    """Identify CPU separation; unknown helper runtimes deliberately get no hit."""
+    if os.environ.get('GNB_LYRICS_ROCM_SEPARATION') == '1':
+        return None
+    try:
+        import importlib.metadata
+        import importlib.util
+        import platform
+        import shutil
+        import sys
+        from lyrics_cache import separator_identity
+        from lyrics_identity import file_identity
+        versions = {name: importlib.metadata.version(name) for name in
+                    ('torch', 'torchaudio', 'demucs', 'numpy', 'safetensors', 'soundfile')}
+        code = [file_identity(Path(__file__))]
+        for name in ('demucs.htdemucs', 'demucs.apply'):
+            spec = importlib.util.find_spec(name)
+            if spec is None or not spec.origin:
+                return None
+            code.append(file_identity(spec.origin))
+        decoder = shutil.which('ffmpeg')
+        if not decoder:
+            return None
+        runtime = {'python': file_identity(sys.executable), 'python_version': platform.python_version(),
+                   'versions': versions, 'code': code, 'decoder': file_identity(decoder),
+                   'cpu_threads': os.environ.get('GNB_LYRICS_CPU_THREADS', '2')}
+        options = {'block_seconds': 30, 'context_seconds': 1, 'shifts': 0, 'split': True,
+                   'overlap': .25, 'normalization': 'per-block-mean-std',
+                   'decode_rate': 44100, 'decode_channels': 2, 'output_rate': 16000}
+        return separator_identity(separator_path(), backend='cpu', runtime=runtime, options=options)
+    except (OSError, ValueError, RuntimeError, ImportError):
+        # Optional acceleration may be unavailable; do not guess provenance.
+        return None
+
+
 def load_alignment_model(bundle, checkpoint, device):
-    """Re-use an exact local file before calling TorchAudio's cache loader."""
-    checkpoint = Path(checkpoint)
-    if not checkpoint.is_file():
-        raise ValueError('The local lyric alignment model has not been installed.')
-    # load_state_dict_from_url reuses model_dir/file_name when that file exists.
-    # The explicit existence guard prevents a missing selected file downloading.
-    return bundle.get_model(dl_kwargs={'model_dir': str(checkpoint.parent),
-                                      'file_name': checkpoint.name}).to(device)
+    """Load local tensors without TorchHub networking or unrestricted pickle."""
+    try:
+        from .lyrics_model_io import load_local_ctc_model
+    except ImportError:
+        from lyrics_model_io import load_local_ctc_model
+    model, identity = load_local_ctc_model(bundle, checkpoint, device)
+    model._gnb_source_identity = identity
+    return model
 
 
 def release_memory():
@@ -115,6 +150,7 @@ def audio_chunks(audio, sr, seconds=40, search=4):
 
 
 def separate_vocals(source, target, work, progress):
+    progress('separating', 0, 'Preparing local vocal separation; playback continues.')
     from lyrics_acceleration import enabled,helper,GpuCapacityDeferred
     if enabled() and os.environ.get('GNB_LYRICS_ROCM_SEPARATION')=='1':
         try:
@@ -132,6 +168,7 @@ def separate_vocals(source, target, work, progress):
     from demucs.htdemucs import HTDemucs
     from demucs.apply import apply_model
     from safetensors.torch import load_file
+    progress('separating', 0, 'Loading the vocal separator for CPU processing; playback continues.')
     separator = separator_path()
     spec = json.loads((separator / 'spec.json').read_text())
     model = HTDemucs(*spec['args'], **spec['kwargs'])
@@ -356,7 +393,13 @@ def alignment_incomplete(words, text):
 
 def transcribe_whisper(audio, engine, progress, title='', evidence=None):
     from faster_whisper import WhisperModel
-    model = WhisperModel(str(model_path(engine)),device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
+    try:
+        from .lyrics_model_io import require_local_tokenizer
+    except ImportError:
+        from lyrics_model_io import require_local_tokenizer
+    selected_model = model_path(engine)
+    require_local_tokenizer(selected_model)
+    model = WhisperModel(str(selected_model),device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
     policy = recognition_policy(engine)
     segments, info = model.transcribe(audio, language=None if policy['language']=='auto' else policy['language'], task=policy['task'], word_timestamps=True,
                                      condition_on_previous_text=False, beam_size=1,
@@ -394,10 +437,10 @@ def transcribe_whisper(audio, engine, progress, title='', evidence=None):
     return cues, warnings+timing_warnings
 
 
-def extract(source, work, engine, separate, reference, progress, title=''):
+def extract(source, work, engine, separate, reference, progress, title='', prealign=None):
     evidence = {'version':'raw-recognition-1', 'primary':{}}
     try:
-        return _extract(source, work, engine, separate, reference, progress, title, evidence)
+        return _extract(source, work, engine, separate, reference, progress, title, evidence, prealign=prealign)
     except Exception as error:
         # The external worker saves this separately on failure, never over the
         # selected recording's saved lyric revision.
@@ -405,7 +448,7 @@ def extract(source, work, engine, separate, reference, progress, title=''):
         raise
 
 
-def _extract(source, work, engine, separate, reference, progress, title, recognition_evidence):
+def _extract(source, work, engine, separate, reference, progress, title, recognition_evidence, prealign=None):
     import soundfile as sf
     import torch
     torch.set_num_threads(int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')))
@@ -413,9 +456,15 @@ def _extract(source, work, engine, separate, reference, progress, title, recogni
     except RuntimeError:pass
     warnings = []
     gpu_used=False;alignment_compute=None;separation_compute=None
-    from lyrics_cache import restore,store
+    from lyrics_cache import restore,store,digest
     processing = source;wav = work/'recognition.wav'
-    cached=bool(separate and restore(source,wav))
+    cache_identity = vocal_cache_identity() if separate else None
+    cache_source_sha = digest(source) if cache_identity is not None else None
+    cached=bool(separate and restore(source,wav,identity=cache_identity))
+    if cached and cache_identity != vocal_cache_identity():
+        # This is our temporary decoded file, never the recording or cache.
+        wav.unlink(missing_ok=True)
+        cached=False
     if cached:
         separation_compute='cached';progress('separating',1,'Reusing the verified private vocal cache.')
     else:
@@ -423,7 +472,9 @@ def _extract(source, work, engine, separate, reference, progress, title, recogni
             processing = work/'vocals.wav'
             separation_compute=separate_vocals(source, processing, work, progress) or 'cpu'
         decode(processing, wav)
-        if separate:store(source,wav)
+        if separate:
+            store(source,wav,identity=cache_identity,current_identity=vocal_cache_identity(),
+                  source_sha256=cache_source_sha)
     audio, sr = sf.read(wav,dtype='float32')
     duration = len(audio)/sr
     input_metrics = measure(audio, sr)
@@ -470,6 +521,20 @@ def _extract(source, work, engine, separate, reference, progress, title, recogni
         if not gpu_used:cues, flags = transcribe_whisper(audio,engine,progress,title,evidence=recognition_evidence['primary'])
         method='whisper-vulkan-dtw' if gpu_used else 'whisper-word-timestamps'
         recognition_evidence['pre_alignment'] = deepcopy(cues)
+        primary_language = recognition_evidence['primary'].get('language',
+            (recognition_evidence['primary'].get('settings') or {}).get('language', 'en'))
+        if prealign is not None and primary_language in {'en', 'English', 'english'}:
+            checked = prealign(audio, sr, cues, duration, progress, recognition_evidence['primary'])
+            cues = checked['cues']
+            report = deepcopy(checked['report'])
+            # The immutable original already lives at primary/pre_alignment.
+            report.pop('primary_evidence', None)
+            recognition_evidence['pre_alignment_recovery'] = report
+            recognition_evidence['alignment_input'] = deepcopy(cues)
+            if report.get('edits'):
+                warnings.append('Bounded independent recognition changed some words. Human review is required before airing.')
+            if report.get('unresolved') or any(region.get('status') == 'held' for region in report.get('regions', [])):
+                warnings.append('Some recognition passages remain unresolved after bounded independent checks. Review the retained words before airing.')
         require_usable_recognition(cues, duration, signal)
         try:
             detected=recognition_evidence['primary'].get('language','en')
@@ -481,7 +546,8 @@ def _extract(source, work, engine, separate, reference, progress, title, recogni
         except GpuCapacityDeferred:
             raise
         except AlignmentRejected as error:
-            recognition_evidence['alignment'] = {'status':'rejected', 'reason':str(error)}
+            recognition_evidence['alignment'] = {'status':'rejected', 'reason':str(error),
+                'diagnostic':deepcopy(getattr(error,'diagnostic',{'status':'unavailable'}))}
             raise
         except Exception as error:
             warnings.append('Recognition word timing was retained because audio realignment was rejected or could not complete: '+str(error)[:300])

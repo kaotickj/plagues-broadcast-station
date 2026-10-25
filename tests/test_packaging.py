@@ -26,8 +26,8 @@ class PackagingTests(unittest.TestCase):
     def test_external_worker_sources_are_data_files_without_model_weights(self):
         spec=self.read_spec();data=spec['datas']
         names={Path(source).name for source,destination in data}
-        for name in ['extract_worker.py','extraction.py','lyrics.py','lyric_timing.py','model_install.py','model_install_worker.py','model_discovery.py',
-                     'lyrics_pipeline.py','lyrics_acceleration.py','lyrics_gpu_helper.py','lyrics_review.py','lyrics_quality.py','lyrics_identity.py','lyrics_cache.py']:
+        for name in ['extract_worker.py','extraction.py','lyrics.py','lyric_timing.py','recognition_drafts.py','model_install.py','model_install_worker.py','model_discovery.py',
+                     'lyrics_pipeline.py','lyrics_acceleration.py','lyrics_gpu_helper.py','lyrics_review.py','lyrics_quality.py','lyrics_identity.py','lyrics_cache.py','lyrics_model_io.py','lyrics_prealignment.py']:
             self.assertIn(name,names)
         self.assertTrue(all(Path(source).exists() for source,destination in data))
         self.assertFalse(any(any(part in source for part in ['media-packs','/private/','/models/']) for source,destination in data))

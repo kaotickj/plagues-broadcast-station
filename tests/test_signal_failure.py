@@ -81,7 +81,8 @@ def test_actual_pipeline_stops_before_alignment_and_exposes_raw_failure_evidence
     align = Mock(side_effect=AssertionError('An unusable stem must never be forced into alignment'))
     modules = {'torch':SimpleNamespace(set_num_threads=lambda n:None,set_num_interop_threads=lambda n:None),
                'soundfile':SimpleNamespace(read=lambda p,**kw:(original if Path(p).name=='original-signal-check.wav' else stem,100)),
-               'lyrics_cache':SimpleNamespace(restore=lambda *a:False,store=lambda *a:None),
+               'lyrics_cache':SimpleNamespace(restore=lambda *a,**kw:False,store=lambda *a,**kw:None,
+                                              digest=Mock(side_effect=AssertionError('Unproven cache identity must not fingerprint source'))),
                'lyrics_acceleration':SimpleNamespace(enabled=lambda:True,recognize_windows=recognize,
                                                       realign=align,GpuCapacityDeferred=type('Deferred',(Exception,),{}),
                                                       AlignmentRejected=type('Rejected',(ValueError,),{}))}
@@ -155,7 +156,8 @@ def test_pipeline_distinguishes_rejected_alignment_from_optional_runtime_failure
         return {'full':deepcopy(words)}
     modules={'torch':SimpleNamespace(set_num_threads=lambda n:None,set_num_interop_threads=lambda n:None),
              'soundfile':SimpleNamespace(read=lambda *a,**kw:(audio_fixture(),100)),
-             'lyrics_cache':SimpleNamespace(restore=lambda *a:False,store=lambda *a:None),
+             'lyrics_cache':SimpleNamespace(restore=lambda *a,**kw:False,store=lambda *a,**kw:None,
+                                              digest=Mock(side_effect=AssertionError('Unproven cache identity must not fingerprint source'))),
              'lyrics_acceleration':SimpleNamespace(enabled=lambda:True,recognize_windows=recognize,
                 realign=Mock(side_effect=error),GpuCapacityDeferred=type('Deferred',(Exception,),{}),AlignmentRejected=Rejected)}
     with patch.dict(sys.modules,modules),patch.object(pipeline,'decode'):

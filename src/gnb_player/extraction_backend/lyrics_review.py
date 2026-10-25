@@ -6,7 +6,7 @@ try:
     from .lyrics_recognition import recognition_policy, cache_policy, segment_evidence
 except ImportError:
     from lyrics_recognition import recognition_policy, cache_policy, segment_evidence
-VERSION='automatic-review-4'
+VERSION='automatic-review-4-neighbour-guard-1'
 
 def token(text):return re.sub(r'[^\w]','',str(text).casefold())
 def flatten(data):return [w for cue in data.get('segments',[]) for w in cue.get('words',[])]
@@ -54,9 +54,48 @@ def gaps(data):
     if duration-previous>=20:result.append((previous,duration))
     return result
 
+def safe_review_edit(cues, duration, before=None, after=None):
+    """Validate a whole proposal before committing it; never clip model evidence.
+
+    Unchanged neighbours bound replacements. The predecessor may already have
+    been reviewed; the successor is still the original, so later rollback cannot
+    expose an overlap. Conservative rejection is preferable to guessed timing.
+    """
+    left_bounds = [before['end']] + [w['end'] for w in before.get('words', [])] if before else [0]
+    right_bounds = [after['start']] + [w['start'] for w in after.get('words', [])] if after else [duration]
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in left_bounds + right_bounds):
+        return False
+    left, right = max(left_bounds), min(right_bounds)
+    for cue in cues:
+        start, end = cue['start'], cue['end']
+        words = cue.get('words', [])
+        if (not all(math.isfinite(v) for v in (start, end, duration, left, right))
+            or start < left or start < 0 or end <= start or end > right or end > duration
+            or not words or token(cue['text']) != token(' '.join(w['text'] for w in words))):
+            return False
+        previous = start
+        for word in words:
+            a, b = word['start'], word['end']
+            if (not all(math.isfinite(v) for v in (a, b)) or a < previous
+                or b <= a or b > end or b - a > 8):
+                return False
+            previous = b
+        left = end
+    return bool(cues)
+
+
 def reconcile(original,secondary,rechecks,activity,preserve_text=False):
     """Pure review core; ASR evidence is injected so changes have testable grounds."""
     data=deepcopy(original);repairs=[];held=[];all_primary=flatten(data);matched=pairing(all_primary,secondary);cursor=0;new_cues=[]
+    def commit(index, cue, proposal, repair):
+        before = new_cues[-1] if new_cues else None
+        after = data['segments'][index+1] if index+1 < len(data['segments']) else None
+        if safe_review_edit([proposal], data['duration'], before, after):
+            new_cues.append(proposal);repairs.append(repair)
+        else:
+            new_cues.append({**cue, 'needs_review': True})
+            held.append({'at': cue['start'], 'reason': 'Review edit rejected: invalid timing, word coverage, or neighbour conflict. Original text and timing retained.'})
+
     for index,cue in enumerate(data['segments']):
         words=cue.get('words',[]);indices=list(range(cursor,cursor+len(words)));cursor+=len(words)
         suspect=suspect_cue(data,index)
@@ -64,8 +103,8 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
         confirmed=[matched.get(i) for i in indices]
         if words and all(w and w.get('score',0)>=.55 for w in confirmed) and confidence(confirmed)>=.72 and valid(confirmed):
             replacement=[{**old,'start':round(new['start'],3),'end':round(new['end'],3),'score':max(float(old.get('score',0)),float(new['score']))} for old,new in zip(words,confirmed)]
-            new_cues.append({**cue,'start':replacement[0]['start'],'end':replacement[-1]['end'],'words':replacement,'needs_review':False})
-            repairs.append({'kind':'timing-confirmed','at':cue['start'],'text':cue['text']});continue
+            commit(index,cue,{**cue,'start':replacement[0]['start'],'end':replacement[-1]['end'],'words':replacement,'needs_review':False},
+                {'kind':'timing-confirmed','at':cue['start'],'text':cue['text']});continue
         # Repair the uncertain words rather than demanding that two models
         # reproduce an entire nine-word line. Strong original words are kept;
         # every weak/invalid word still requires independent same-word evidence.
@@ -79,8 +118,8 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
                 candidate.append(dict(old));unresolved=unresolved or weak
         if (candidate and not unresolved and supported>=max(1,math.ceil(len(words)*.8))
             and confidence(candidate)>=.72 and valid(candidate)):
-            new_cues.append({**cue,'start':candidate[0]['start'],'end':candidate[-1]['end'],'words':candidate,'needs_review':False})
-            repairs.append({'kind':'wordwise-audio-confirmation','at':cue['start'],'text':cue['text'],'confirmed_words':supported,'total_words':len(words)});continue
+            commit(index,cue,{**cue,'start':candidate[0]['start'],'end':candidate[-1]['end'],'words':candidate,'needs_review':False},
+                {'kind':'wordwise-audio-confirmation','at':cue['start'],'text':cue['text'],'confirmed_words':supported,'total_words':len(words)});continue
         check=rechecks.get(index,[])
         before=data['segments'][index-1]['end'] if index else 0
         after=data['segments'][index+1]['start'] if index+1<len(data['segments']) else data['duration']
@@ -91,15 +130,15 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
             new_text=' '.join(w['text'] for w in third)
             if not preserve_text or token(new_text)==token(cue['text']):
                 replacement=[dict(w) for w in third]
-                new_cues.append({'start':replacement[0]['start'],'end':replacement[-1]['end'],'text':cue['text'] if preserve_text else new_text,'words':replacement,'needs_review':False})
-                repairs.append({'kind':'two-model-correction','at':cue['start'],'before':cue['text'],'after':new_text});continue
+                commit(index,cue,{**cue,'start':replacement[0]['start'],'end':replacement[-1]['end'],'text':cue['text'] if preserve_text else new_text,'words':replacement,'needs_review':False},
+                    {'kind':'two-model-correction','at':cue['start'],'before':cue['text'],'after':new_text});continue
         # Both fresh recognizers must reject an uncertain phrase, and the vocal
         # stem must be quiet, before an ASR artifact is removed. Never edit a
         # person's lyric sheet or correction automatically.
         if (not preserve_text and index in rechecks and not second and not third and words
             and min(w.get('score',1) for w in words)<.15 and activity(left,right)<.2):
             repairs.append({'kind':'unsupported-phrase-removed','at':cue['start'],'text':cue['text'],'evidence':'Both fresh ASR passes found no words in a quiet vocal interval.'});continue
-        new_cues.append(cue);held.append({'at':cue['start'],'reason':'The models did not agree sufficiently on this passage.'})
+        new_cues.append({**cue,'needs_review':True});held.append({'at':cue['start'],'reason':'The models did not agree sufficiently on this passage.'})
     # Recover a missing verse only from agreement between the full secondary
     # transcription and a fresh large-model pass of that exact audio interval.
     # No language model invents words to bridge the gap.
@@ -111,8 +150,14 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
             and all(w.get('score',0)>=.35 for w in second+third)
             and third[0]['start']>=start and third[-1]['end']<=end and activity(third[0]['start'],third[-1]['end'])>=.2):
             recovered,flags=make_cues(third,data['duration'])
-            if not flags:
+            ordered=sorted(new_cues,key=lambda c:c['start'])
+            place=bisect.bisect_left([c['start'] for c in ordered],recovered[0]['start'])
+            before=ordered[place-1] if place else None
+            after=ordered[place] if place<len(ordered) else None
+            if not flags and safe_review_edit(recovered,data['duration'],before,after):
                 new_cues.extend(recovered);repairs.append({'kind':'missing-vocal-recovered','at':third[0]['start'],'text':' '.join(w['text'] for w in third),'evidence':'Two fresh audio recognition passes agree on these previously missing words.'})
+            else:
+                held.append({'at':start,'reason':'Gap recovery rejected: invalid timing or neighbour conflict. Original passage retained.'})
     data['segments']=sorted(new_cues,key=lambda c:c['start']);new_cues=data['segments']
     verified_gaps=[]
     # A gap is only cleared when both full-song ASR passes found no words and
@@ -128,7 +173,9 @@ def reconcile(original,secondary,rechecks,activity,preserve_text=False):
         if not remaining_suspect and ('timing review' in warning or 'uncertain recognition' in warning):continue
         if not unverified_gaps and 'long gap remains' in warning:continue
         warnings.append(warning)
-    data['warnings']=warnings
+    if any('rejected' in passage['reason'] for passage in held):
+        warnings.append('Some automatic review edits were rejected; original passages need timing review.')
+    data['warnings']=list(dict.fromkeys(warnings))
     words=flatten(data);scores=[float(w['score']) for w in words if isinstance(w.get('score'),(int,float))]
     metrics=dict(data.get('metrics') or {});metrics.update(words=len(words),lines=len(new_cues),timed_seconds=round(sum(c['end']-c['start'] for c in new_cues),2))
     if scores:metrics.update(recognition_confidence=round(sum(scores)/len(scores),4),low_confidence_fraction=round(sum(s<.35 for s in scores)/len(scores),4))
@@ -157,7 +204,13 @@ def recognize(audio,sr,windows,engine,progress,evidence=None):
     import lyrics_cache
     policy=recognition_policy(engine,independent=True)
     if evidence is not None:evidence.update(backend='faster-whisper',engine=engine,settings=policy,windows=[])
-    model_factory=lambda:WhisperModel(selected_model_path,device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
+    def model_factory():
+        try:
+            from .lyrics_model_io import require_local_tokenizer
+        except ImportError:
+            from lyrics_model_io import require_local_tokenizer
+        require_local_tokenizer(selected_model_path)
+        return WhisperModel(selected_model_path,device='cpu',compute_type='int8',cpu_threads=int(os.environ.get('GNB_LYRICS_CPU_THREADS','2')),num_workers=1,local_files_only=True)
     # Review evidence is reusable only for these actual model/runtime bytes.
     # A same-path model repair must never inherit the previous model's words.
     cache_config=None
@@ -224,9 +277,18 @@ def review(source,work,data,progress,preserve_text=False):
             # Keep review on the same selected input as primary recognition.
             # A disabled separator must never be re-enabled by automatic review.
             decode(source,wav)
-        elif restore(source,wav):progress('separating',1,'Reusing the verified private vocal cache.')
         else:
-            vocals=work/'review-vocals.wav';separate_vocals(source,vocals,work,progress);decode(vocals,wav);store(source,wav)
+            from lyrics_pipeline import vocal_cache_identity
+            from lyrics_cache import digest
+            identity=vocal_cache_identity()
+            source_sha=digest(source) if identity is not None else None
+            cached=restore(source,wav,identity=identity)
+            if cached and identity!=vocal_cache_identity():
+                wav.unlink(missing_ok=True);cached=False
+            if cached:progress('separating',1,'Reusing the verified private vocal cache.')
+            else:
+                vocals=work/'review-vocals.wav';separate_vocals(source,vocals,work,progress);decode(vocals,wav)
+                store(source,wav,identity=identity,current_identity=vocal_cache_identity(),source_sha256=source_sha)
     audio,sr=sf.read(wav,dtype='float32');duration=len(audio)/sr
     window=max(1,int(sr*.25));padded=np.pad(audio,(0,(-len(audio))%window));energy=np.sqrt(np.mean(padded.reshape(-1,window)**2,axis=1));reference=max(float(np.quantile(energy,.95)),1e-7)
     def activity(a,b):

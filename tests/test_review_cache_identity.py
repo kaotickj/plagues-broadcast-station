@@ -15,6 +15,8 @@ from gnb_player.extraction_backend import lyrics_cache as cache
 
 @pytest.fixture
 def cpu_review(tmp_path, monkeypatch):
+    (tmp_path/'existing-model').mkdir()
+    (tmp_path/'existing-model/tokenizer.json').write_text('{}')
     counts={'models':0,'transcribes':0,'identities':0}
     state={'identity':{'model_sha256':'a'*64,'runtime_sha256':'b'*64}}
     def identify(path):

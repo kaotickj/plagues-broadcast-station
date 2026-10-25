@@ -50,7 +50,10 @@ def test_original_mix_review_never_separates_or_restores_stem(tmp_path,existing_
     forbidden.assert_not_called()
     assert requests[0][0]=='medium.en'
     assert any(engine=='large-v3' and any(key==0 for key,_,_ in windows) for engine,windows in requests)
-    assert after['segments']==before['segments'] and after['machine_review']['held_passages']
+    # The installed neighbour hotfix now explicitly marks unresolved passages.
+    # Text, word evidence and original timing must still remain byte-for-value.
+    expected=deepcopy(before['segments']);expected[0]['needs_review']=True
+    assert after['segments']==expected and after['machine_review']['held_passages']
     assert after['warnings']==before['warnings']
     assert not after['machine_review']['repairs']
     assert not (tmp_path/'review-vocals.wav').exists()

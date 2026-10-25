@@ -238,6 +238,86 @@ def save_failure_evidence(cache: Path, evidence: dict, fingerprint: str, message
         if temporary is not None: temporary.unlink(missing_ok=True)
 
 
+def retain_failed_recognition(error: Exception, evidence: dict, cache: Path, fingerprint: str) -> Exception:
+    """Retain model text outside timed lyrics; never replace a user's draft."""
+    if not isinstance(evidence, dict) or not evidence:
+        return error
+    try:
+        diagnostic = save_failure_evidence(cache, evidence, fingerprint, str(error))
+    except Exception as diagnostic_error:
+        print('Failed-extraction diagnostics could not be saved:', type(diagnostic_error).__name__, file=sys.stderr, flush=True)
+        return error
+    draft = None
+    try:
+        from recognition_drafts import (text_from_evidence, create_initial_draft,
+                                       draft_path, load_draft)
+        text = text_from_evidence(evidence)
+        saved = create_initial_draft(cache, fingerprint, text, diagnostic)
+        if saved is not None:
+            draft = saved.path
+        else:
+            existing = draft_path(cache, fingerprint)
+            if existing.exists():
+                draft = load_draft(existing, expected_source_sha256=fingerprint).path
+    except Exception as draft_error:
+        # Raw evidence is retained even when a separate draft cannot be made.
+        print('Untimed recognition draft could not be retained:', type(draft_error).__name__, file=sys.stderr, flush=True)
+    if isinstance(error, ValueError):
+        error = ValueError(str(error) + ' Existing lyrics were kept. Diagnostics: ' + str(diagnostic)
+                           + (' Untimed recognition draft retained separately for editing.' if draft else ''))
+    error.diagnostic_path = str(diagnostic)
+    error.source_sha256 = fingerprint
+    if draft is not None:
+        error.recognition_draft_path = str(draft)
+    return error
+
+
+def protected_human_target(raw: bytes | None) -> bool:
+    """Automatic recognition must not replace an already edited/reference draft."""
+    if raw is None:
+        return False
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    pipeline = data.get('pipeline')
+    if pipeline is not None and not isinstance(pipeline, dict):
+        return True
+    return (bool(data.get('human_review')) or bool(data.get('publication'))
+            or (pipeline or {}).get('recognizer') == 'supplied-lyrics')
+
+
+def prealign_recognition(audio, sr, cues, duration, report_progress, primary):
+    """Bounded fresh CPU second opinions before global CTC can reject text."""
+    from lyrics_prealignment import refine
+    from lyrics_review import recognize, safe_review_edit
+
+    def second_opinion(engine, start, end):
+        # Explicit CPU independent checks provide segment/no-speech evidence.
+        # This is one external worker; saved GPU preferences are never changed.
+        old = {name: os.environ.get(name) for name in ('GNB_LYRICS_GPU', 'GNB_LYRICS_FRESH_RECOGNITION')}
+        measured = {}
+        try:
+            os.environ.update(GNB_LYRICS_GPU='0', GNB_LYRICS_FRESH_RECOGNITION='1')
+            words = recognize(audio, sr, [('bounded-prealignment', start, end)], engine,
+                              report_progress, evidence=measured)['bounded-prealignment']
+        finally:
+            for name, value in old.items():
+                if value is None: os.environ.pop(name, None)
+                else: os.environ[name] = value
+        windows = measured.get('windows', [])
+        segments = [segment for window in windows
+                    for segment in (window.get('recognition') or {}).get('segments', [])]
+        return {'words': words, 'segments': segments, 'backend': measured.get('backend'),
+                'fresh': bool(windows) and all(window.get('cached') is False for window in windows),
+                'evidence': measured}
+
+    return refine(cues, duration, second_opinion, raw_primary=primary,
+                  validate_edit=safe_review_edit)
+
+
 def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "") -> dict:
     source = source.expanduser().resolve(strict=True)
     output = output.expanduser().absolute()
@@ -247,6 +327,7 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
         raise ValueError("The supplied lyric sheet is limited to 20,000 characters.")
     with lyric_write_lock(output):
         expected_output_revision = lyric_target_revision(output)
+        protect_human = protected_human_target(lyric_target_bytes(output))
     before_size, before_mtime, fingerprint, duration = validate_source(source, config.media_library_path)
     require_runtime(config, reference)
     prepare_environment(config)
@@ -257,20 +338,18 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
     from lyrics_quality import assess
     from lyrics_recognition import transcript_snapshot
     reset_gpu_timings()
+    progress('preparing', 0, 'Preparing local lyric models. CPU work and each requested GPU phase report their own backend.')
     with tempfile.TemporaryDirectory(prefix="gnb-player-lyrics-") as folder:
         work = Path(folder)
         try:
-            data = extract(source, work, config.engine, config.separate_vocals, reference, progress, title=source.stem)
+            options = {'prealign': prealign_recognition} if config.auto_review and not reference else {}
+            data = extract(source, work, config.engine, config.separate_vocals, reference, progress, title=source.stem, **options)
         except Exception as error:
             evidence = getattr(error, 'recognition_evidence', None)
             if isinstance(evidence, dict) and evidence:
-                try:
-                    diagnostic = save_failure_evidence(Path(config.cache_dir).expanduser(), evidence, fingerprint, str(error))
-                except Exception as diagnostic_error:
-                    print('Failed-extraction diagnostics could not be saved:', type(diagnostic_error).__name__, file=sys.stderr, flush=True)
-                else:
-                    if isinstance(error, ValueError):
-                        raise ValueError(str(error)+' Existing lyrics were kept. Diagnostics: '+str(diagnostic)) from error
+                retained = retain_failed_recognition(error, evidence, Path(config.cache_dir).expanduser(), fingerprint)
+                if retained is not error:
+                    raise retained from error
             raise
         data.setdefault('recognition_evidence',{})['before_review']=transcript_snapshot(data)
         if config.auto_review and assess(data)["status"] != "pass":
@@ -285,24 +364,29 @@ def run(source: Path, output: Path, config: ExtractionConfig, reference: str = "
         try:
             normalize_generated_timing(data)
         except ValueError as error:
-            message = str(error) + ' Existing lyrics were kept.'
-            try:
-                diagnostic = save_failure_evidence(Path(config.cache_dir).expanduser(),
-                    data.get('recognition_evidence', {}), fingerprint, message)
-            except Exception as diagnostic_error:
-                print('Failed-extraction diagnostics could not be saved:', type(diagnostic_error).__name__, file=sys.stderr, flush=True)
-            else:
-                message += ' Diagnostics: ' + str(diagnostic)
-            raise ValueError(message) from error
+            retained = retain_failed_recognition(error, data.get('recognition_evidence', {}), Path(config.cache_dir).expanduser(), fingerprint)
+            if retained is error:
+                raise
+            raise retained from error
     if source.stat().st_size != before_size or source.stat().st_mtime_ns != before_mtime or source_fingerprint(source) != fingerprint:
-        raise ValueError("The recording changed during extraction. Existing lyrics were kept; retry once the copy or edit finishes.")
+        error = ValueError("The recording changed during extraction. Existing lyrics were kept; retry once the copy or edit finishes.")
+        raise retain_failed_recognition(error, data.get('recognition_evidence', {}), Path(config.cache_dir).expanduser(), fingerprint)
     if abs(float(data.get("duration", 0)) - duration) > 2:
         raise ValueError("Extracted audio duration did not match the recording. Existing lyrics were kept.")
     data.update(title=source.stem, source_sha256=fingerprint, source_size=before_size,
                 source_mtime=before_mtime / 1e9, created_at=int(time.time()), reviewed=False)
     data.setdefault("pipeline",{})["gpu_schedule"]={"policy":"phase-scoped-exclusive","phases":gpu_timings()}
     data["quality"] = assess(data)
-    atomic_result(output, data, expected_output_revision)
+    if protect_human and not reference:
+        error = ValueError('The saved lyric document contains human edits, approval or supplied lyrics. Automatic recognition was retained separately instead of replacing it.')
+        raise retain_failed_recognition(error, data.get('recognition_evidence', {}), Path(config.cache_dir).expanduser(), fingerprint)
+    try:
+        atomic_result(output, data, expected_output_revision)
+    except ValueError as error:
+        retained = retain_failed_recognition(error, data.get('recognition_evidence', {}), Path(config.cache_dir).expanduser(), fingerprint)
+        if retained is error:
+            raise
+        raise retained from error
     return data
 
 
@@ -335,7 +419,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:
         message = str(error) if isinstance(error, (ValueError, FileNotFoundError, PermissionError)) else "Local lyric extraction failed. Check the model runtime and logs; existing lyrics were kept."
         print(type(error).__name__ + ": " + str(error)[:1000], file=sys.stderr, flush=True)
-        emit({"type": "error", "message": message[:4000]})
+        event = {"type": "error", "message": message[:4000]}
+        for name in ('diagnostic_path', 'source_sha256', 'recognition_draft_path'):
+            value = getattr(error, name, None)
+            if isinstance(value, str): event[name] = value[:4096]
+        emit(event)
         return 1
 
 
