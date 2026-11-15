@@ -158,7 +158,7 @@ def test_independent_review_uses_its_own_existing_model(tmp_path):
         factory = Mock(return_value=model)
         cache = SimpleNamespace(evidence_path=lambda *a: tmp_path / "unused", read_evidence=lambda *a: None, write_evidence=lambda *a: None)
         modules = {"faster_whisper": SimpleNamespace(WhisperModel=factory), "lyrics_pipeline": backend,
-                   "lyrics_acceleration": SimpleNamespace(enabled=lambda: False, recognize_windows=None), "lyrics_cache": cache}
+                   "lyrics_acceleration": SimpleNamespace(enabled=lambda: False, recognize_windows=None, GpuCapacityDeferred=ValueError), "lyrics_cache": cache}
         with patch.dict(sys.modules, modules), patch.object(backend, "release_memory"):
             output = review.recognize([0] * 16000, 16000, [("full", 0, 1)], "medium.en", lambda *a: None)
     assert output["full"] and factory.call_args.args == (str(secondary),)

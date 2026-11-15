@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from hashlib import file_digest
+from hashlib import file_digest, sha256
 from pathlib import Path
 from typing import Any
 import json
@@ -13,6 +15,8 @@ import re
 import tempfile
 
 MAX_LYRIC_BYTES = 8 * 1024 * 1024
+MAX_IMPORT_PROVENANCE_BYTES = 256 * 1024
+IMPORT_PROVENANCE_SCHEMA = 'broadcast-import-provenance-1'
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,7 @@ class Word:
     text: str
     start: float
     end: float
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +33,7 @@ class Cue:
     start: float
     end: float
     words: list[Word] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -38,6 +44,8 @@ class LyricsDocument:
     source_sha256: str = ""
     warnings: list[str] = field(default_factory=list)
     quality: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    human_review: dict[str, Any] = field(default_factory=dict)
 
     def active_cue(self, seconds: float) -> Cue | None:
         if not math.isfinite(seconds) or seconds < 0 or not self.segments:
@@ -56,14 +64,16 @@ class LyricsDocument:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "version": "broadcast-player-lyrics-1",
+            **deepcopy(self.metadata),
+            "version": self.metadata.get("version", "broadcast-player-lyrics-1"),
             "title": self.title,
-            "duration": self.duration,
+            "duration": float(self.duration),
             "source_sha256": self.source_sha256,
-            "warnings": self.warnings,
-            "quality": self.quality,
-            "segments": [{"start": c.start, "end": c.end, "text": c.text,
-                          "words": [{"text": w.text, "start": w.start, "end": w.end}
+            "warnings": deepcopy(self.warnings),
+            "quality": deepcopy(self.quality),
+            "human_review": deepcopy(self.human_review),
+            "segments": [{**deepcopy(c.metadata), "start": float(c.start), "end": float(c.end), "text": c.text,
+                          "words": [{**deepcopy(w.metadata), "text": w.text, "start": float(w.start), "end": float(w.end)}
                                     for w in c.words]} for c in self.segments],
         }
 
@@ -74,7 +84,7 @@ class LyricsDocument:
         raw = data.get("segments", [])
         if not isinstance(raw, list) or len(raw) > 10000:
             raise ValueError("The lyric file has too many lines or an invalid line list.")
-        warnings = [str(value)[:1000] for value in data.get("warnings", [])[:100]] if isinstance(data.get("warnings"), list) else []
+        warnings = [str(value) for value in data.get("warnings", [])] if isinstance(data.get("warnings"), list) else []
         cues: list[Cue] = []
         invalid_words = False
         for item in raw:
@@ -88,11 +98,13 @@ class LyricsDocument:
                     a, b = _interval(word.get("start"), word.get("end"))
                     if a < start - .1 or b > end + .1:
                         raise ValueError("Word outside its line")
-                    words.append(Word(str(word.get("text", ""))[:1000], a, b))
+                    extras = {key: deepcopy(value) for key, value in word.items() if key not in {"text", "start", "end"}}
+                    words.append(Word(str(word.get("text", ""))[:1000], a, b, extras))
                 except (AttributeError, ValueError, TypeError):
                     invalid_words = True
             if text.strip():
-                cues.append(Cue(text, start, end, sorted(words, key=lambda value: value.start)))
+                extras = {key: deepcopy(value) for key, value in item.items() if key not in {"text", "start", "end", "words"}}
+                cues.append(Cue(text, start, end, sorted(words, key=lambda value: value.start), extras))
         cues.sort(key=lambda cue: cue.start)
         if invalid_words:
             warnings.append("Some imported words had invalid timing; their line text is retained without guessed word timing.")
@@ -103,7 +115,19 @@ class LyricsDocument:
         if fingerprint and not re.fullmatch(r"[a-fA-F0-9]{64}", fingerprint):
             raise ValueError("The lyric file contains an invalid source fingerprint.")
         quality = data.get("quality") if isinstance(data.get("quality"), dict) else {}
-        return cls(cues, supplied_duration, str(data.get("title", ""))[:1000], fingerprint.lower(), warnings, quality)
+        extras = {key: deepcopy(value) for key, value in data.items()
+                  if key not in {"title", "duration", "source_sha256", "warnings", "quality", "segments", "human_review"}
+                  and not (key == "version" and value == "broadcast-player-lyrics-1")}
+        review = deepcopy(data.get("human_review")) if isinstance(data.get("human_review"), dict) else {}
+        result = cls(cues, supplied_duration, str(data.get("title", ""))[:1000], fingerprint.lower(), warnings, deepcopy(quality), extras, review)
+        result._review_base_state = _review_state_digest(result)
+        return result
+
+
+def _review_state_digest(document: LyricsDocument) -> str:
+    """Ephemeral concurrency token including approval/revocation audit fields."""
+    payload = json.dumps(document.to_dict(), sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _finite(value: Any) -> float:
@@ -174,11 +198,18 @@ def parse_subtitles(text: str, duration: float = 0, title: str = "") -> LyricsDo
     return LyricsDocument(cues, duration or (cues[-1].end if cues else 0), title)
 
 
-def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
-    file = Path(path)
-    if not file.is_file() or file.stat().st_size > MAX_LYRIC_BYTES:
+def _read_lyric_bytes(file: Path) -> bytes:
+    if not file.is_file():
         raise ValueError("Choose a lyric JSON, LRC, SRT or VTT file smaller than 8 MB.")
-    text = file.read_text(encoding="utf-8-sig")
+    with file.open('rb') as handle:
+        payload = handle.read(MAX_LYRIC_BYTES + 1)
+    if len(payload) > MAX_LYRIC_BYTES:
+        raise ValueError("Choose a lyric JSON, LRC, SRT or VTT file smaller than 8 MB.")
+    return payload
+
+
+def _parse_lyric_bytes(file: Path, payload: bytes, duration: float) -> LyricsDocument:
+    text = payload.decode('utf-8-sig')
     suffix = file.suffix.lower()
     if suffix == ".lrc":
         return parse_lrc(text, duration, file.stem)
@@ -187,12 +218,138 @@ def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
     return LyricsDocument.from_dict(json.loads(text), duration)
 
 
+def load_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
+    file = Path(path)
+    return _parse_lyric_bytes(file, _read_lyric_bytes(file), duration)
+
+
+def lyric_content_revision(path: str | Path) -> str:
+    """Hash the bounded saved lyric bytes, including readable subtitle links."""
+    return sha256(_read_lyric_bytes(Path(path))).hexdigest()
+
+
+def _json_bytes(data) -> bytes:
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
+
+
+def preserve_import_provenance(document: LyricsDocument, original: dict | None = None,
+                               *, payload: bytes | None = None, source_format='json',
+                               source_name='', kind='legacy-provenance-before-local-review') -> None:
+    """Preserve inert origin claims once; never convert imported claims to approval.
+
+    Metadata values stay in the normal document unchanged except for effective
+    publication flags handled by the review layer. The bounded snapshot keeps
+    important origin fields first; oversized/excess fields have explicit hashes
+    and remain available in the ordinary preserved metadata. No nested snapshots
+    are created on a subsequent import/export cycle.
+    """
+    existing = document.metadata.get('import_provenance')
+    if (isinstance(existing, dict) and existing.get('schema') == IMPORT_PROVENANCE_SCHEMA
+            and existing.get('claims_are_unverified') is True
+            and re.fullmatch(r'[a-f0-9]{64}', str(existing.get('payload_sha256', '')))
+            and len(_json_bytes(existing)) <= MAX_IMPORT_PROVENANCE_BYTES):
+        return
+    original = deepcopy(original if original is not None else document.to_dict())
+    metadata = {key: value for key, value in original.items() if key != 'segments'}
+    preferred = ['song_id', 'recording_id', 'origin_id', 'source_sha256', 'source_size',
+                 'source_mtime', 'source', 'origin', 'provenance', 'publication',
+                 'reviewed', 'human_review', 'machine_review', 'quality', 'title', 'duration', 'version']
+    keys = [key for key in preferred if key in metadata] + [key for key in metadata if key not in preferred]
+    fields, omitted, used = {}, [], 0
+    omitted_count = 0
+    for index, key in enumerate(keys):
+        encoded = _json_bytes({key: metadata[key]})
+        if index < 256 and len(encoded) <= 64 * 1024 and used + len(encoded) <= 192 * 1024:
+            fields[key] = deepcopy(metadata[key]); used += len(encoded)
+        else:
+            omitted_count += 1
+            if len(omitted) < 128:
+                omitted.append({'field': str(key)[:256], 'sha256': sha256(encoded).hexdigest(), 'bytes': len(encoded)})
+    snapshot = {'schema': IMPORT_PROVENANCE_SCHEMA, 'kind': kind,
+                'claims_are_unverified': True, 'source_format': str(source_format)[:16],
+                'source_name': str(source_name)[:256],
+                'payload_sha256': sha256(payload if payload is not None else _json_bytes(original)).hexdigest(),
+                'original_metadata_sha256': sha256(_json_bytes(metadata)).hexdigest(),
+                'original_fields': fields, 'omitted_fields': omitted, 'omitted_field_count': omitted_count}
+    if len(_json_bytes(snapshot)) > MAX_IMPORT_PROVENANCE_BYTES:
+        raise ValueError('The imported provenance snapshot exceeds the supported size.')
+    document.metadata['import_provenance'] = snapshot
+
+
+def load_imported_lyrics(path: str | Path, duration: float = 0) -> LyricsDocument:
+    """Explicit operator import: capture origin before any local audio/title binding."""
+    file = Path(path)
+    payload = _read_lyric_bytes(file)
+    document = _parse_lyric_bytes(file, payload, duration)
+    original = json.loads(payload.decode('utf-8-sig')) if file.suffix.lower() not in {'.lrc', '.srt', '.vtt'} else document.to_dict()
+    preserve_import_provenance(document, original, payload=payload,
+                               source_format=file.suffix.lower().lstrip('.') or 'json',
+                               source_name=file.name, kind='explicit-file-import')
+    if len(json.dumps(document.to_dict(), ensure_ascii=False, allow_nan=False, indent=2).encode('utf-8')) > MAX_LYRIC_BYTES:
+        raise ValueError('The imported lyrics and provenance exceed the supported 8 MB saved-file size.')
+    return document
+
+
+def lyric_target_bytes(target: str | Path) -> bytes | None:
+    """Bounded raw target snapshot for compare-and-swap writers; None means absent."""
+    target = Path(target)
+    if target.is_symlink():
+        raise ValueError('Save lyrics to a regular JSON file, not a symbolic link.')
+    if not target.exists():
+        return None
+    return _read_lyric_bytes(target)
+
+
+def lyric_target_revision(target: str | Path) -> str | None:
+    payload = lyric_target_bytes(target)
+    return sha256(payload).hexdigest() if payload is not None else None
+
+
+@contextmanager
+def lyric_write_lock(target: str | Path):
+    """Serialize cooperating manual/import/extraction writers, without Qt."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = target.with_name("." + target.name + ".review.lock")
+    if lock.is_symlink():
+        raise ValueError("Refusing a symbolic-link lyric write lock.")
+    with lock.open("a+b") as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                if handle.seek(0, os.SEEK_END) == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError("Another lyric write is in progress. Retry after it finishes.") from None
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def save_lyrics(document: LyricsDocument, path: str | Path) -> None:
     """Atomic local save. Failed imports/extraction cannot leave a partial sidecar."""
     target = Path(path)
+    with lyric_write_lock(target):
+        _save_lyrics_unlocked(document, target)
+
+
+def _save_lyrics_unlocked(document: LyricsDocument, target: Path) -> None:
     if target.is_symlink():
         raise ValueError("Choose a regular lyric file, not a symbolic link.")
     payload = json.dumps(document.to_dict(), ensure_ascii=False, allow_nan=False, indent=2)
+    if len(payload.encode('utf-8')) > MAX_LYRIC_BYTES:
+        raise ValueError('The lyric file exceeds the supported 8 MB saved-file size.')
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".lyrics-", suffix=".json", dir=target.parent)
     try:

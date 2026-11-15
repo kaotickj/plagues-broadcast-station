@@ -73,6 +73,19 @@ def test_real_ten_second_recording_has_synchronized_video_and_actual_tone(tmp_pa
     session.error.connect(errors.append);session.status.connect(messages.append)
     initial=QImage(640,360,QImage.Format.Format_RGB32);initial.fill(QColor('#112c37'))
     session.set_video_frame(initial);session.start(config)
+    # FFmpeg opens the video and audio inputs before the encoder's clock starts.
+    # Measure ten seconds of recording, excluding that variable startup latency.
+    ready_deadline=time.monotonic()+12
+    try:
+        while (session.running and not errors
+               and not any('Recording clean' in message for message in messages)
+               and time.monotonic()<ready_deadline):
+            app.processEvents();time.sleep(.02)
+        assert not errors,errors
+        assert any('Recording clean' in message for message in messages),'Encoder did not become ready within twelve seconds'
+    except BaseException:
+        session.stop();session.wait(12)
+        raise
     began=time.monotonic();sample=0;next_video=0
     while time.monotonic()-began<10 and session.running:
         count=960

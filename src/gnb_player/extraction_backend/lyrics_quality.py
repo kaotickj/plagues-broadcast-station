@@ -1,6 +1,6 @@
 """Conservative publication gate; machine checks do not certify lyric accuracy."""
 import math,re,time
-VERSION='lyrics-qc-2'
+VERSION='lyrics-qc-4'
 
 # Hold likely credits/sign-offs for review; never remove their text. A bare
 # "thank you", or listening embedded in a lyric, is not enough evidence.
@@ -9,6 +9,42 @@ _TRANSCRIPTION_ARTIFACT=re.compile(
     r'|^\s*(?:thank\s+you|thanks)\s+for\s+listening[.!…\s]*$'
     r'|(?:©|\(c\)|\bcopyright\b)\s*(?:\d{4}\s*)?transcript(?:ion)?\b'
     r'|^\s*(?:transcript(?:ion)?|transcribed)\s+by\b',re.I)
+_OPENING_CREDIT=re.compile(
+    r'^\s*(?i:transcript(?:ion)?|transcribed)(?:\s+(?i:by))?\s+'
+    r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b')
+
+def artifact_suspected(data,index):
+    segments=data.get('segments') or []
+    if not 0<=index<len(segments):return False
+    cue=segments[index]
+    if not isinstance(cue,dict):return False
+    if _TRANSCRIPTION_ARTIFACT.search(str(cue.get('text',''))):return True
+    opening=[c for c in segments[:2] if isinstance(c,dict)]
+    return bool(index<2 and _OPENING_CREDIT.search(' '.join(str(c.get('text','')) for c in opening)))
+
+def decoder_segments(evidence):
+    """Normalize available diagnostics; absent backend fields stay unknown."""
+    mapping = lambda value: value if isinstance(value,dict) else {}
+    rows = lambda value: value if isinstance(value,list) else []
+    evidence = mapping(evidence)
+    independent = mapping(evidence.get('independent_review'))
+    for decoder in (mapping(evidence.get('primary')), mapping(independent.get('secondary')),
+                    mapping(independent.get('rechecks'))):
+        yield from rows(decoder.get('segments'))
+        for window in rows(decoder.get('windows')):
+            window = mapping(window)
+            for raw in (mapping(window.get('recognition')), mapping(window.get('raw'))):
+                yield from rows(raw.get('segments'))
+                for segment in rows(raw.get('transcription')):
+                    if not isinstance(segment,dict):continue
+                    # whisper.cpp usually omits no-speech probability. Never
+                    # synthesize one from token scores or an empty passage.
+                    start = mapping(segment.get('offsets')).get('from')
+                    offset = window.get('start',0)
+                    if all(isinstance(v,(int,float)) and math.isfinite(v) for v in (start,offset)):
+                        yield {**segment, 'start': offset + start / 1000}
+                    else:yield segment
+
 
 def assess(data):
     reasons=[]
@@ -22,7 +58,7 @@ def assess(data):
         flag('duration','Recording duration is outside the automatic song-publication range.');duration=0
     segments=data.get('segments',[]);words=[];last=-1;last_end=0;previous='';repeats=0
     if not isinstance(segments,list) or not segments:flag('empty','No complete lyric lines were produced.');segments=[]
-    for cue in segments:
+    for index,cue in enumerate(segments):
         if not isinstance(cue,dict):flag('timing','Invalid lyric line.');continue
         start,end=cue.get('start'),cue.get('end')
         if not all(isinstance(v,(int,float)) and math.isfinite(v) for v in (start,end)):
@@ -41,11 +77,31 @@ def assess(data):
             if a<last-.1 or b<=a or a<start-.1 or b>end+.1 or b-a>8:
                 flag('word_timing','Check overlapping, zero-length, or unusually stretched word timing.',a)
             last=b;words.append(word)
+            if 'alignment_score' in word:
+                alignment=word['alignment_score']
+                if (not isinstance(alignment,(int,float)) or not math.isfinite(alignment)
+                        or not 0<=alignment<=1 or alignment<.15):
+                    flag('alignment_confidence','Audio alignment confidence is low or invalid; check this word timing.',a)
         phrase=normal(text)
         repeats=repeats+1 if phrase and phrase==previous else 1
         if repeats>=4:flag('repetition','Check this repeated passage for recognition looping.',start)
         previous=phrase
-        if _TRANSCRIPTION_ARTIFACT.search(text):flag('hallucination','A passage resembles a common transcription artifact.',start)
+        if artifact_suspected(data,index):flag('hallucination','A passage resembles a common transcription artifact.',start)
+    # Word-sized decoder output can split a credit across adjacent display rows.
+    # This is a review flag only: it must never delete an audible lyric or a name.
+    opening=[cue for cue in segments[:2] if isinstance(cue,dict)]
+    if opening and _OPENING_CREDIT.search(' '.join(str(c.get('text','')) for c in opening)):
+        flag('hallucination','A passage resembles a common transcription artifact.',opening[0].get('start'))
+    evidence=data.get('recognition_evidence')
+    if not isinstance(evidence,dict):evidence={}
+    signal=evidence.get('signal')
+    if isinstance(signal,dict) and signal.get('suspect_stem'):
+        flag('input_signal','The separated track has little active signal compared with the original mix; check the vocal input.')
+    for raw in decoder_segments(evidence):
+        if not isinstance(raw,dict) or not str(raw.get('text','')).strip():continue
+        silence=raw.get('no_speech_prob')
+        if isinstance(silence,(int,float)) and math.isfinite(silence) and silence>=.6:
+            flag('non_speech_evidence','Words were recognized in audio the model also judged likely non-speech; listen to this saved passage.',raw.get('start'))
     for warning in data.get('warnings',[]):
         if warning:flag('model_warning','The extraction model left review warnings. Check the notes below.')
     count=len(words)
