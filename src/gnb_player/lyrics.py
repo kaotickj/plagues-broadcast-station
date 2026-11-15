@@ -13,6 +13,10 @@ import math
 import os
 import re
 import tempfile
+try:
+    from .review_partial import partial_tokens
+except ImportError:  # extract_worker imports this module from its standalone directory
+    from review_partial import partial_tokens
 
 MAX_LYRIC_BYTES = 8 * 1024 * 1024
 MAX_IMPORT_PROVENANCE_BYTES = 256 * 1024
@@ -25,6 +29,79 @@ class Word:
     start: float
     end: float
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+    @property
+    def highlight_intervals(self):
+        value = self.metadata.get('highlight_intervals')
+        return tuple(_highlight_pair(pair) for pair in value) if value is not None else None
+
+    @property
+    def highlight_allowed(self):
+        return self.metadata.get('highlight_allowed', True) is not False
+
+    def to_dict(self):
+        return {**deepcopy(self.metadata), 'text': self.text, 'start': self.start, 'end': self.end}
+
+
+def _highlight_pair(pair):
+    return (pair["start"], pair["end"]) if isinstance(pair, dict) else tuple(pair)
+
+
+def word_is_active(word, seconds):
+    """One interval contract shared by private review and Program Output."""
+    data = word if isinstance(word, dict) else ({**getattr(word, 'metadata', {}), 'start': word.start, 'end': word.end} if word is not None else None)
+    if not data or data.get('highlight_allowed', True) is False:
+        return False
+    if not data['start'] <= seconds < data['end']:
+        return False
+    intervals = data.get('highlight_intervals')
+    return intervals is None or any(a <= seconds < b for a, b in map(_highlight_pair, intervals))
+
+
+def cue_is_active(cue, seconds, document=None):
+    """Keep a line visible between words; underline support is a separate clock.
+
+    Explicit holes *inside* a word/group and disabled words retain their existing
+    hiding meaning. Owner-confirmed instrumental exclusions also take precedence.
+    """
+    try: partial_tokens(cue)
+    except (ValueError, TypeError, AttributeError): return False
+    start, end, words = (cue['start'], cue['end'], cue.get('words', [])) if isinstance(cue, dict) else (cue.start, cue.end, cue.words)
+    if not start <= seconds < end:
+        return False
+    metadata=document if isinstance(document,dict) else getattr(document,'metadata',{})
+    original=metadata.get('reference_provenance',{}).get('original_review_data',{})
+    for gap in metadata.get('confirmed_instrumental_gaps',original.get('confirmed_instrumental_gaps',[])):
+        a,b=_highlight_pair(gap)
+        if a<=seconds<b:return False
+    explicit = any(('highlight_intervals' in w or 'highlight_allowed' in w) if isinstance(w, dict)
+                   else ('highlight_intervals' in getattr(w, 'metadata', {}) or 'highlight_allowed' in getattr(w, 'metadata', {})) for w in words)
+    if not explicit or any(word_is_active(word, seconds) for word in words):return True
+    data=[w if isinstance(w,dict) else w.to_dict() for w in words]
+    if any(w['start']<=seconds<w['end'] for w in data):return False
+    return any(a['end']<=seconds<b['start'] and a.get('highlight_allowed',True) is not False
+               and b.get('highlight_allowed',True) is not False
+               for a,b in zip(data,data[1:]))
+
+
+def validate_highlight_intervals(word):
+    """Reject malformed explicit intervals; never silently enable a hidden span."""
+    if 'highlight_allowed' in word and type(word['highlight_allowed']) is not bool:
+        raise ValueError('Highlight permission must be true or false.')
+    if 'highlight_intervals' not in word:
+        return
+    intervals = word['highlight_intervals']
+    if not isinstance(intervals, (list, tuple)):
+        raise ValueError('Highlight intervals must be an explicit list.')
+    previous = float(word['start'])
+    for pair in intervals:
+        if not isinstance(pair, (dict, list, tuple)) or len(pair) != 2:
+            raise ValueError('Invalid highlight interval.')
+        a, b = _interval(*_highlight_pair(pair))
+        if a < previous - 1e-6 or b > float(word['end']) + 1e-6:
+            raise ValueError('Highlight intervals must be ordered inside their word/group.')
+        previous = b
 
 
 @dataclass
@@ -47,6 +124,10 @@ class LyricsDocument:
     metadata: dict[str, Any] = field(default_factory=dict)
     human_review: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def untimed_text(self):
+        return self.metadata.get('untimed_lyrics','') if self.metadata.get('timing_mode')=='untimed' and not self.segments else ''
+
     def active_cue(self, seconds: float) -> Cue | None:
         if not math.isfinite(seconds) or seconds < 0 or not self.segments:
             return None
@@ -54,13 +135,13 @@ class LyricsDocument:
         if index < 0:
             return None
         cue = self.segments[index]
-        return cue if cue.start <= seconds < cue.end else None
+        return cue if cue_is_active(cue, seconds, self) else None
 
     def active_word(self, seconds: float) -> Word | None:
         cue = self.active_cue(seconds)
         if cue is None:
             return None
-        return next((word for word in cue.words if word.start <= seconds < word.end), None)
+        return next((word for word in cue.words if word_is_active(word, seconds)), None)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,30 +165,55 @@ class LyricsDocument:
         raw = data.get("segments", [])
         if not isinstance(raw, list) or len(raw) > 10000:
             raise ValueError("The lyric file has too many lines or an invalid line list.")
+        if data.get('timing_mode')=='untimed':
+            text=data.get('untimed_lyrics')
+            if raw or not isinstance(text,str) or not text.strip() or len(text)>100000:
+                raise ValueError('Untimed lyric sheets need text and must not contain timestamped cues.')
+            sheet=data.get('supplied_sheet',{})
+            if not isinstance(sheet,dict) or sheet.get('source_sha256')!=data.get('source_sha256') or sheet.get('sung_text')!=text:
+                raise ValueError('Untimed text must match its recording-bound saved sheet.')
         warnings = [str(value) for value in data.get("warnings", [])] if isinstance(data.get("warnings"), list) else []
         cues: list[Cue] = []
         invalid_words = False
         for item in raw:
             if not isinstance(item, dict):
                 raise ValueError("A lyric line is invalid.")
+            # Partial labels cannot conceal invalid words that the legacy
+            # importer would otherwise remove/sort into native-issue evidence.
+            partial_tokens(item)
             start, end = _interval(item.get("start"), item.get("end"))
             text = str(item.get("text", ""))[:20000]
             words: list[Word] = []
-            for word in item.get("words", []) if isinstance(item.get("words"), list) else []:
+            native_issues = []
+            for word_index, word in enumerate(item.get("words", []) if isinstance(item.get("words"), list) else []):
+                if isinstance(word, dict) and ("highlight_intervals" in word or "highlight_allowed" in word):
+                    validate_highlight_intervals(word)
                 try:
                     a, b = _interval(word.get("start"), word.get("end"))
                     if a < start - .1 or b > end + .1:
                         raise ValueError("Word outside its line")
                     extras = {key: deepcopy(value) for key, value in word.items() if key not in {"text", "start", "end"}}
                     words.append(Word(str(word.get("text", ""))[:1000], a, b, extras))
-                except (AttributeError, ValueError, TypeError):
+                except (AttributeError, ValueError, TypeError) as error:
                     invalid_words = True
+                    # Failed native spans are evidence, not usable word timing.
+                    # Never silently convert an all-invalid list to line timing.
+                    native_issues.append({'word_index': word_index,
+                        'raw_word': _native_evidence(word), 'reason': str(error),
+                        'status': 'unresolved', 'replacement_interval': None})
             if text.strip():
                 extras = {key: deepcopy(value) for key, value in item.items() if key not in {"text", "start", "end", "words"}}
-                cues.append(Cue(text, start, end, sorted(words, key=lambda value: value.start), extras))
+                if native_issues:
+                    previous = extras.get('native_timing_issues', [])
+                    if not isinstance(previous, list):
+                        raise ValueError('Invalid native timing issue evidence.')
+                    extras['native_timing_issues'] = previous + native_issues
+                cue = Cue(text, start, end, sorted(words, key=lambda value: value.start), extras)
+                partial_tokens(cue)
+                cues.append(cue)
         cues.sort(key=lambda cue: cue.start)
         if invalid_words:
-            warnings.append("Some imported words had invalid timing; their line text is retained without guessed word timing.")
+            warnings.append("Some imported words had invalid timing; original spans are retained as unresolved evidence. No guessed timing or automatic line-timing approval.")
         supplied_duration = _finite(data.get("duration", duration or (cues[-1].end if cues else 0)))
         if supplied_duration < 0:
             raise ValueError("Lyric duration must be positive.")
@@ -122,6 +228,17 @@ class LyricsDocument:
         result = cls(cues, supplied_duration, str(data.get("title", ""))[:1000], fingerprint.lower(), warnings, deepcopy(quality), extras, review)
         result._review_base_state = _review_state_digest(result)
         return result
+
+
+def _native_evidence(value):
+    """Keep malformed numeric evidence serializable without converting it to time."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {'invalid_number_repr': repr(value)}
+    if isinstance(value, dict):
+        return {key: _native_evidence(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_native_evidence(item) for item in value]
+    return deepcopy(value)
 
 
 def _review_state_digest(document: LyricsDocument) -> str:

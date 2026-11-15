@@ -35,19 +35,27 @@ retained as evidence and cannot approve the new text. **Approve for airing**
 still requires separate review of the saved lyrics against that recording.
 Neither Save nor local airing approval publishes to a website.
 
-## Timed lyric preview preference
+## Local publication gate
 
-In **Lyrics → More lyric options**, **Preview unapproved saved lyrics on Program
-Output** starts checked when a station has no saved choice. Its last on/off choice
-is saved with that station's playlist/session and restored on restart, including
-an explicit off choice. Opening an older playlist without this setting keeps the
-current choice. Selecting a recording, importing lyrics or saving a correction
-does not reset it. Separate station data directories keep separate preferences.
+Program Output, its operator thumbnail and saved/streamed frames all require a
+persisted, current local human approval for the exact audio SHA256 and lyric
+revision. Cached text, imported website status, unreviewed model results and
+unresolved held passages cannot render. A legacy `preview_unapproved_lyrics`
+profile value is retained for compatibility but has no effect on output.
 
-The **Lyrics-ready tracks only** playback filter is independent and still requires
-approval for the exact saved lyric revision and recording. Preview never approves
-lyrics or includes unapproved recordings in that filtered queue. Unsaved edits
-stay out of Program Output until Save succeeds; source identity checks still apply.
+Drafts remain available in the editor and private Review-assisted lyrics player.
+The **Lyrics-ready tracks only** queue filter remains independent: turning it off
+allows songs without approved lyrics to play, with lyrics hidden. Approval is an
+explicit **Approve for airing** or **Approve & use in library** action; it is not
+website publication or automatic synchronization.
+
+A separate private review draft does not replace an existing approved library
+file. That approved file can continue to render. Main-library unsaved edits clear
+lyrics immediately; saving them replaces the current artifact with an unapproved
+revision and preserves history. Approve the new revision before airing it.
+There is no automatic fallback to a historical approved version. Deleted or
+revoked files, edited revisions and changed recordings fail closed at rendering;
+track switches clear the old text and highlights immediately.
 
 Cooperating saves use a write lock and expected revision checks. Extraction
 compares the target revision captured before processing before replacing it; a

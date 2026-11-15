@@ -14,7 +14,7 @@ def fixture_state(tmp_path):
     track=SimpleNamespace(path=audio)
     document=LyricsDocument([Cue('Original words',1,2)],3,source_sha256=fingerprint(audio))
     window=SimpleNamespace(_lyric_stamps={},lyric_files={str(audio):str(lyric)},
-        _lyric_locations={},_lyric_file_stamps={},_source_checks={},documents={},_invalid_lyrics=set())
+        _publication_revisions={},_lyric_locations={},_lyric_file_stamps={},_source_checks={},documents={},_invalid_lyrics=set())
     return lyric,track,document,window
 
 

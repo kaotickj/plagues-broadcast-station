@@ -12,13 +12,26 @@ import tempfile
 import time
 import uuid
 
-from .lyrics import Cue, Word, LyricsDocument, MAX_LYRIC_BYTES, fingerprint, lyric_write_lock, _review_state_digest, preserve_import_provenance
+from .lyrics import Cue, Word, LyricsDocument, MAX_LYRIC_BYTES, fingerprint, lyric_write_lock, _review_state_digest, preserve_import_provenance, validate_highlight_intervals
 from .lyric_timing import normalize_rounded_boundaries, validate_line_interval
+from .review_vocabulary import unresolved_suggestions
+from .review_acceptance import AS_IS_SCHEMA, acceptance_requirements, validate_acceptance
+from .review_partial import partial_tokens
 
 
 def document_revision(document: LyricsDocument) -> str:
-    data = document.to_dict()
-    data.pop("human_review", None)
+    # Hash a read-only view with the identical interchange shape. Deep-copying
+    # every raw model/history record here stalls the per-frame output gate.
+    data = {**document.metadata,
+            'version': document.metadata.get('version', 'broadcast-player-lyrics-1'),
+            'title': document.title, 'duration': float(document.duration),
+            'source_sha256': document.source_sha256, 'warnings': document.warnings,
+            'quality': document.quality,
+            'segments': [{**cue.metadata, 'start': float(cue.start), 'end': float(cue.end),
+                          'text': cue.text, 'words': [{**w.metadata, 'text': w.text,
+                          'start': float(w.start), 'end': float(w.end)} for w in cue.words]}
+                         for cue in document.segments]}
+    data.pop('human_review', None)
     payload = json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -47,13 +60,23 @@ def _rows(rows, duration, *, allow_empty=False):
     return result
 
 
+def is_instrumental(document):
+    return document.metadata.get("instrumental") is True and not document.segments
+
+
 def _validate(document, *, allow_empty=False, validate_words=True):
-    _rows([(cue.start, cue.end, cue.text) for cue in document.segments], document.duration, allow_empty=allow_empty)
+    if document.metadata.get('timing_mode')=='untimed':
+        # A genuine sheet has no acoustic times; duration zero is permissible.
+        # Reuse serialization checks for text/source binding, never add cues.
+        LyricsDocument.from_dict(document.to_dict())
+        return
+    _rows([(cue.start, cue.end, cue.text) for cue in document.segments], document.duration, allow_empty=allow_empty or is_instrumental(document))
     if not validate_words:
         return
     for cue in document.segments:
         previous = cue.start
         for word in cue.words:
+            validate_highlight_intervals(word.to_dict())
             if (isinstance(word.start, bool) or isinstance(word.end, bool) or
                     not all(isinstance(value, (int, float)) and math.isfinite(value) for value in (word.start, word.end)) or
                     word.start < previous or word.end <= word.start or word.end > cue.end):
@@ -62,12 +85,33 @@ def _validate(document, *, allow_empty=False, validate_words=True):
                 raise ValueError("Timed words need text. Use Line timing to remove invalid word timing from this line.")
             previous = word.end
         normalize = lambda text: re.sub(r"\W+", "", text.casefold())
-        if cue.words and normalize(" ".join(word.text for word in cue.words)) != normalize(cue.text):
+        mapping = partial_tokens(cue)
+        if cue.words and mapping is None and normalize(" ".join(word.text for word in cue.words)) != normalize(cue.text):
             raise ValueError("Timed word labels do not match the lyric line. Use Line timing to retain its text and line times without incorrect word timing.")
+
+
+def unresolved_holds(document: LyricsDocument) -> bool:
+    """Only exact, explicitly acknowledged partial output can retain omissions."""
+    try:
+        held=document.metadata.get('held_passages',[])
+        if (isinstance(held,list) and all(isinstance(h,dict) and h.get('status') in
+                ('excluded_by_operator','operator_requested_alignment') for h in held)
+                and not unresolved_suggestions(document)
+                and not any(c.metadata.get('native_timing_issues') or c.metadata.get('partial_timing') for c in document.segments)):
+            return False
+        acknowledgement=document.human_review.get('output_acceptance')
+        if acknowledgement is not None:
+            # Validation computes requirements and the exact request once.
+            return not validate_acceptance(document, acknowledgement)
+        requirements = acceptance_requirements(document)
+        return bool(requirements['blockers'] or requirements['requires_confirmation'])
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return True
 
 
 def is_approved(document: LyricsDocument, source_sha256: str | None = None) -> bool:
     try:
+        if unresolved_holds(document):return False
         review = document.human_review
         digest = document.source_sha256
         when = review.get("reviewed_at")
@@ -76,7 +120,7 @@ def is_approved(document: LyricsDocument, source_sha256: str | None = None) -> b
                 (source_sha256 is not None and source_sha256 != digest) or
                 isinstance(when, bool) or not isinstance(when, (int, float)) or not math.isfinite(when) or when <= 0):
             return False
-        _validate(document)
+        _validate(document, allow_empty=review.get('output_acceptance', {}).get('schema') == AS_IS_SCHEMA)
         return review.get("document_revision") == document_revision(document)
     except (TypeError, ValueError, AttributeError):
         return False
@@ -197,16 +241,30 @@ def edit_document(document: LyricsDocument, rows) -> LyricsDocument:
     return result
 
 
-def approve_document(document: LyricsDocument, source_sha256: str) -> LyricsDocument:
+def approve_document(document: LyricsDocument, source_sha256: str, *, acceptance=None) -> LyricsDocument:
+    as_is = isinstance(acceptance, dict) and acceptance.get('schema') == AS_IS_SCHEMA
+    _validate(document, allow_empty=as_is)
+    if as_is:
+        validate_acceptance(document, acceptance)
+    else:
+        requirements = acceptance_requirements(document)
+        if requirements['blockers']:
+            raise ValueError('Unresolved native or held timing prevents approval: ' + '; '.join(requirements['blockers']))
+        if requirements['requires_confirmation'] and acceptance is None:
+            raise ValueError('Explicit acceptance of the displayed result is required.')
+        if acceptance is not None:
+            validate_acceptance(document, acceptance)
     if not isinstance(source_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", source_sha256) or document.source_sha256 != source_sha256:
         raise ValueError("Approval requires the exact fingerprint of this lyric document's recording.")
     result = deepcopy(document)
     result._review_base_state = getattr(document, "_review_base_state", _review_state_digest(document))
-    _validate(result)
+    _validate(result, allow_empty=as_is)
     _hold_quality(result)
     alignment = _alignment(result)
     result.human_review = {"status": "approved", "source_sha256": source_sha256,
                            "document_revision": document_revision(result), "reviewed_at": int(time.time()), "method": "human"}
+    if acceptance is not None:
+        result.human_review['output_acceptance'] = deepcopy(acceptance)
     if isinstance(alignment, list) and alignment:
         result.human_review["alignment_needed"] = deepcopy(alignment)
     return result
@@ -235,7 +293,7 @@ def _history(target, original):
     backup.chmod(0o600)
 
 
-def save_review_document(document: LyricsDocument, target, source, expected_revision, approve: bool = False) -> LyricsDocument:
+def save_review_document(document: LyricsDocument, target, source, expected_revision, approve: bool = False, *, acceptance=None) -> LyricsDocument:
     """Save one displayed base revision; only explicit approve=True signs it.
 
     Cooperating new app/import/extraction writers use the same lock. Legacy or
@@ -265,8 +323,8 @@ def save_review_document(document: LyricsDocument, target, source, expected_revi
             raise ValueError("The existing lyric target belongs to another recording. Choose a separate lyric file.")
         result = deepcopy(document)
         result.source_sha256 = digest
-        _validate(result, allow_empty=not approve, validate_words=approve)
-        result = approve_document(result, digest) if approve else invalidate_review(result, "Saved draft; approve this exact revision before airing.")
+        _validate(result, allow_empty=not approve or (isinstance(acceptance, dict) and acceptance.get('schema') == AS_IS_SCHEMA), validate_words=approve)
+        result = approve_document(result, digest, acceptance=acceptance) if approve else invalidate_review(result, "Saved draft; approve this exact revision before airing.")
         payload = json.dumps(result.to_dict(), ensure_ascii=False, allow_nan=False, indent=2).encode("utf-8")
         if len(payload) > MAX_LYRIC_BYTES:
             raise ValueError("The reviewed lyric file exceeds the supported size.")

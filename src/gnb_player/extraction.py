@@ -21,7 +21,6 @@ LINUX_SHARED_PATHS = {
     'gpu_python_path': Path('/opt/gnb-lyrics-gpu/bin/python'),
     'vulkan_binary': Path('/opt/gnb-whisper-vulkan-src/build/bin/whisper-cli'),
     'vulkan_model': Path('/var/lib/gnb-lyrics/models/whisper-vulkan/ggml-large-v3-q5_0.bin'),
-    'gpu_lock': Path('/run/lock/gnb-ai-gpu.lock'),
 }
 _ALIGNMENT_CHECKPOINT = Path('hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth')
 
@@ -82,8 +81,8 @@ class ExtractionConfig:
         for name in ("use_gpu", "wait_for_gpu", "separate_vocals", "reuse_recognition", "auto_review"):
             if not isinstance(getattr(config, name), bool):
                 raise ValueError("Extraction switches must be true or false.")
-        if isinstance(config.cpu_threads, bool) or not isinstance(config.cpu_threads, int) or not 1 <= config.cpu_threads <= 8:
-            raise ValueError("Choose between one and eight model CPU threads.")
+        if isinstance(config.cpu_threads, bool) or not isinstance(config.cpu_threads, int) or config.cpu_threads < 1:
+            raise ValueError("Choose a positive CPU thread count.")
         if isinstance(config.gpu_wait_seconds, bool) or not isinstance(config.gpu_wait_seconds, int) or not 0 <= config.gpu_wait_seconds <= 3600:
             raise ValueError("GPU wait must be between zero and 3600 seconds.")
         if config.engine not in {"large-v3", "medium.en", "small.en"}:
@@ -246,7 +245,7 @@ def resolve_existing_models(config: ExtractionConfig) -> tuple[ExtractionConfig,
         else:
             choices = ([Path(original).expanduser()] if original else []) + candidates
             found = next((p for p in choices if available(p)), None)
-            value = str(found) if found is not None else str(fallback)
+            value = str(found) if found is not None else (original or str(fallback))
             origin = 'shared-linux' if found is not None and any(str(found) == str(p) for p in shared.values()) else ('user-local' if found is not None else 'fallback')
             reason = ('Using existing ' + origin + ' path.' if found is not None else 'No installed candidate found; retained the user-local/default fallback.')
         setattr(resolved, name, value)
@@ -263,13 +262,15 @@ def resolve_existing_models(config: ExtractionConfig) -> tuple[ExtractionConfig,
            lambda p: _readable(p / _ALIGNMENT_CHECKPOINT), local_torch)
     runtimes = _runtime_candidates(base) + ([shared['python_path']] if shared else [])
     choose('python_path', runtimes, lambda p: [p], _executable, '')
-    for name in ('gpu_python_path', 'vulkan_binary', 'vulkan_model', 'gpu_lock'):
+    for name in ('gpu_python_path', 'vulkan_binary', 'vulkan_model'):
         candidates = ([Path(resolved.model_root) / 'whisper-vulkan/ggml-large-v3-q5_0.bin'] if name == 'vulkan_model' else [])
         candidates += [shared[name]] if shared else []
         check = _executable if name in {'gpu_python_path', 'vulkan_binary'} else (_existing_lock if name == 'gpu_lock' else _readable)
         choose(name, candidates, lambda p: [p], check,
                Path(resolved.model_root) / 'whisper-vulkan/ggml-large-v3-q5_0.bin' if name == 'vulkan_model' else '')
 
+    resolved.gpu_lock = ''  # Legacy saved paths no longer gate generation.
+    remember('gpu_lock', '', [], 'disabled', 'Shared GPU locking removed; scheduling is manual.')
     effective = _configured_model_paths(resolved)
     for component, current in effective.items():
         name = component + '_model_path'

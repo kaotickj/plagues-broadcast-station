@@ -269,12 +269,12 @@ def test_importing_an_approved_document_creates_an_unapproved_saved_revision(win
     imported=approve_document(imported,fingerprint(track.path))
     incoming=tmp_path/'imported.json';save_lyrics(imported,incoming)
     monkeypatch.setattr('gnb_player.app.QFileDialog.getOpenFileName',lambda *a,**kw:(str(incoming),'Timed lyrics'))
-    window.allow_drafts.setChecked(True)
+    window._legacy_draft_preview_preference=True
     window.import_lyrics();pending[-1].finish()
     result=load_lyrics(cached)
     assert result.segments[0].text==imported.segments[0].text and not is_approved(result)
     assert 'LYRICS NEED REVIEW' in window.playlist.item(0).text()
-    assert window.allow_drafts.isChecked() and not window._has_lyrics(track)
+    assert not window._has_lyrics(track) and window.stage._lyrics is None
 
 
 def test_intentionally_empty_draft_can_be_saved_but_never_approved(window,tmp_path,pending):

@@ -179,7 +179,8 @@ class BroadcastProfileStore:
         Use this outer lock around those calls; its separate file permits the
         individual methods to retain their existing inner locks.
         """
-        with self._lock(".broadcast-profile-operation.lock"):
+        from .studio_settings import studio_lock
+        with studio_lock(self.data_dir), self._lock(".broadcast-profile-operation.lock"):
             yield
 
     def _read_marker(self):
@@ -242,14 +243,14 @@ class BroadcastProfileStore:
             if not path.is_file() or path.stat().st_size > 16000:
                 raise ValueError
             data = json.loads(path.read_text(encoding="utf-8"))
-            if (not isinstance(data, dict) or set(data) != {
-                    "schema", "destination", "picture_index", "bitrate_kbps", "remember"}
+            if (not isinstance(data, dict) or not {
+                    "schema", "destination", "picture_index", "bitrate_kbps", "remember"}.issubset(data)
                     or type(data["schema"]) is not int or data["schema"] != 1
                     or type(data["remember"]) is not bool):
                 raise ValueError
             profile = StreamProfile(data["destination"], "", data["picture_index"], data["bitrate_kbps"])
             # A blank ordinary destination is the intentional protected-only URL.
-            if profile.destination == "" and data["remember"]:
+            if profile.destination == "":
                 StreamProfile("rtmps://validation.invalid/app", "", profile.picture_index,
                               profile.bitrate_kbps).validate()
             else:
@@ -296,8 +297,9 @@ class BroadcastProfileStore:
             with self._lock():
                 # Refuse unknown formats or links, preserving their existing data.
                 self._read_settings()
+                previous = json.loads(self.settings_file.read_text()) if self.settings_file.exists() else {}
                 atomic_json(self.settings_file, {
-                    "schema": 1, "destination": profile.destination if safe_url else "",
+                    **previous, "schema": 1, "destination": profile.destination if safe_url else "",
                     "picture_index": profile.picture_index, "bitrate_kbps": profile.bitrate_kbps,
                     "remember": remember,
                 })

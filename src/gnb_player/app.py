@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QListWidget, QListWidgetItem, QAbstractItemView,
     QFileDialog, QMessageBox, QTabWidget, QLineEdit, QPlainTextEdit, QSlider,
     QCheckBox, QDoubleSpinBox, QSpinBox, QFormLayout, QComboBox, QProgressBar,
-    QSplitter, QGroupBox, QScrollArea, QColorDialog,
+    QSplitter, QGroupBox, QScrollArea, QColorDialog, QStackedWidget,
 )
 from .broadcast_profile import BroadcastProfileStore, StreamProfile, ProfileError
 from .recognition_draft_dialog import RecognitionDraftDialog
@@ -24,7 +24,8 @@ from .file_state import file_change_stamp
 from .lyric_review import document_revision, is_approved, edit_document, retarget_review, save_review_document
 from .lyric_editor import TimedLyricsEditor, stored_review_notes, parse_seconds
 from .extraction import ExtractionConfig, discover_config, config_status, build_command, parse_worker_event, default_data_dir, resolve_existing_models, MODEL_PATH_FIELDS
-from .settings import atomic_json, read_profile, write_profile, load_m3u, save_m3u, starter_profile
+from .studio_settings import studio_lock, recover_import, read_json, snapshot_session, make_backup, export_studio, prepare_import, import_studio
+from .settings import export_model_preferences, import_model_preferences, save_model_preferences, atomic_json, read_profile, write_profile, load_m3u, save_m3u, starter_profile
 
 APP_NAME = "Plague's Broadcast Station"
 
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
     def __init__(self, data_dir: Path, profile: Path | None = None, *, credential_store=None):
         super().__init__()
         self.data_dir = Path(data_dir); self.data_dir.mkdir(parents=True, exist_ok=True)
+        recover_import(self.data_dir)
         self.credential_store = credential_store or BroadcastProfileStore(self.data_dir)
         self._profile_busy = False
         self._saved_stream_snapshot = None
@@ -98,6 +100,8 @@ class MainWindow(QMainWindow):
         self.lyric_files: dict[str, str] = {}; self.documents = {}; self.tasks = []
         self._lyric_stamps={}; self._invalid_lyrics=set(); self._lyric_requests={}
         self._lyric_locations={}; self._lyric_file_stamps={}; self._lyric_buffers={}; self._saving_lyrics=set(); self._source_checks={}
+        self._publication_revisions={}
+        self._legacy_draft_preview_preference=False # preserved in profiles, never an output bypass
         self._editor_track=None; self._editor_document=None; self._editor_revision=None
         self._last_review_poll=None
         self._extract_context=None
@@ -105,12 +109,13 @@ class MainWindow(QMainWindow):
         self.profile_name = 'Goodneighbor Blues'; self._scan_busy = False
         self._extract_queue = []; self._extract_current = None; self._process_bytes = b''
         self._closing = False; self._seek_drag = False; self._track_generation = 0; self._displayed_track = None
-        self.stage = BroadcastStage(); self.stage.setWindowTitle(APP_NAME + ' · Program Output')
+        self.stage = BroadcastStage(publication_guard=self._program_publication_valid); self.stage.setWindowTitle(APP_NAME + ' · Program Output')
         self.engine = PlaybackEngine(self)
         self._edited_model_paths=set(); self._model_config_warning=''
         try: self.extract_config = ExtractionConfig.from_dict(self.saved.get('extraction', discover_config().to_dict()))
         except (TypeError, ValueError) as error:
             self.extract_config = discover_config(); self._model_config_warning='Saved model settings could not be read: '+str(error)
+        self._saved_model_values = deepcopy(self.saved.get('extraction', {}))
         self.extract_config,self._model_resolution_report=resolve_existing_models(self.extract_config)
         self.extract_config.cache_dir = str(self.data_dir/'lyrics-cache')
         self.extract_process = QProcess(self)
@@ -143,7 +148,81 @@ class MainWindow(QMainWindow):
             try: self.load_profile(start)
             except Exception as error: self._message(f'Could not open playlist: {error}')
         self._message('Ready. Play a track, then show Program Output or start a local recording.')
-        if self.credential_store.settings_file.exists() or self.credential_store.marker.exists():self.restore_stream_profile(confirm=False)
+        if 'studio_ui' in self.saved:
+            ordinary=read_json(self.data_dir/'broadcast-settings.json',{})
+            self._apply_studio_controls(self.saved,ordinary)
+            if ordinary.get('remember'):self.restore_stream_profile(confirm=False)
+        elif self.credential_store.settings_file.exists() or self.credential_store.marker.exists():self.restore_stream_profile(confirm=False)
+
+    def _studio_backup_tab(self):
+        page=QWidget(); layout=QVBoxLayout(page)
+        info=QLabel('Back up studio settings: lyric/model choices, appearance, playlist and artwork/lyric links, playback preferences, monitoring controls, recording destination and public broadcast server, picture size and bitrate. Other non-secret configuration fields are retained.\n\nExcluded: stream keys, passwords, tokens, protected credential references, private/authenticated stream URLs, media/model files, lyric contents, caches and logs. Local paths are included; another computer may need path relocation. Import never starts playback, output or models.')
+        info.setWordWrap(True);layout.addWidget(info)
+        layout.addWidget(self._button('Export studio settings…',self.export_studio_settings))
+        layout.addWidget(self._button('Import studio settings…',self.import_studio_settings))
+        layout.addStretch();self.tabs.addTab(page,'Settings backup')
+
+    def _studio_ui_values(self):
+        recording=self.destination.text() if self.output_mode.currentIndex()==0 else self._output_destinations[0]
+        return {'shuffle':self.shuffle.isChecked(),'repeat':self.repeat.isChecked(),'volume':self.volume.value(),
+                'offset':self.offset.value(),'broadcast_preview':self.broadcast_preview_toggle.isChecked(),
+                'output_mode':self.output_mode.currentIndex(),'recording_destination':recording}
+
+    def _apply_studio_controls(self,settings,stream):
+        ui=settings.get('studio_ui',{})
+        self.shuffle.setChecked(ui.get('shuffle',True));self.repeat.setChecked(ui.get('repeat',True))
+        self.volume.setValue(ui.get('volume',70));self.offset.setValue(ui.get('offset',0))
+        self.broadcast_preview_toggle.setChecked(ui.get('broadcast_preview',False))
+        self.output_mode.setCurrentIndex(ui.get('output_mode',0))
+        self._output_destinations={0:ui.get('recording_destination',''),1:stream.get('destination','')}
+        self.destination.setText(self._output_destinations[self.output_mode.currentIndex()])
+        self.resolution.setCurrentIndex(stream.get('picture_index',0));self.bitrate.setValue(stream.get('bitrate_kbps',4500))
+        self.stream_key.clear();self.remember_stream_key.setChecked(False);self._saved_stream_snapshot=None
+
+    def export_studio_settings(self):
+        name,_=QFileDialog.getSaveFileName(self,'Export studio settings — excludes credentials',str(Path.home()/'broadcast-studio-settings.json'),'JSON settings (*.json)')
+        if not name:return
+        try:
+            values=self.extract_config.to_dict();values.update({key:entry.text().strip() for key,entry in self.model_fields.items()})
+            values.update(use_gpu=self.gpu.isChecked(),separate_vocals=self.separate_vocals.isChecked(),reuse_recognition=self.reuse_recognition.isChecked())
+            explicit=set(values.get('explicit_paths',[]))
+            for key in self._edited_model_paths:
+                if values.get(key):explicit.add(key)
+                else:explicit.discard(key)
+            values['explicit_paths']=sorted(explicit);values=ExtractionConfig.from_dict(values).to_dict()
+            destination=self.destination.text() if self.output_mode.currentIndex()==1 else self._output_destinations[1]
+            overrides={'settings.json':{'extraction':values,'studio_ui':self._studio_ui_values()},
+                       'session.json':snapshot_session(self.data_dir,self.all_tracks,self.backgrounds,self.lyric_files,self.visual_settings(),self.profile_name),
+                       'broadcast-settings.json':{'schema':1,'destination':destination,'picture_index':self.resolution.currentIndex(),'bitrate_kbps':self.bitrate.value(),'remember':False}}
+            backup=make_backup(self.data_dir,overrides,secrets=(self.stream_key.text().strip(),))
+            export_studio(name,backup,self.data_dir)
+            self._message('Studio settings exported. Credentials, private stream URLs and media/model/lyric files are excluded. '+str(len(backup['redacted_fields']))+' sensitive fields omitted.')
+        except Exception as error:self._message('Could not export studio settings: '+str(error))
+
+    def import_studio_settings(self):
+        if self.export.running or self.engine.playing or self._profile_busy or self._scan_busy or self._lyric_buffers or self._saving_lyrics or self.extract_process.state()!=QProcess.ProcessState.NotRunning:
+            self._message('Import requires an idle studio with pending lyric edits saved. Nothing was changed.');return
+        name,_=QFileDialog.getOpenFileName(self,'Import studio settings',str(Path.home()),'JSON settings (*.json)')
+        if not name:return
+        try:
+            files,missing,source=prepare_import(name,self.data_dir)
+            if source['home']!=str(Path.home()):
+                answer=QMessageBox.question(self,'Relocate home-folder paths?','This backup used '+source['home']+'. Select a corresponding folder on this computer? Choose No to keep its external paths.',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+                if answer==QMessageBox.StandardButton.Yes:
+                    folder=QFileDialog.getExistingDirectory(self,'Folder corresponding to '+source['home'],str(Path.home()))
+                    if not folder:return
+                    files,missing,source=prepare_import(name,self.data_dir,home_root=folder)
+            message='Replace studio settings and playlist links from this backup? Credentials and media/model/lyric files will not be imported. Existing credentials remain stored but are not activated. Nothing starts automatically.'
+            if missing:message+='\n\n'+str(len(missing))+' referenced paths are unavailable. They will be preserved for repair, not erased. Examples:\n'+'\n'.join(missing[:4])
+            if QMessageBox.question(self,'Import studio settings?',message,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+            self.save_timer.stop()
+            saved=import_studio(self.data_dir,files)
+            self.saved=saved['settings.json'];self.extract_config=ExtractionConfig.from_dict(self.saved['extraction'])
+            self._saved_model_values=deepcopy(self.saved['extraction']);_,self._model_resolution_report=resolve_existing_models(self.extract_config)
+            self._edited_model_paths.clear();self._model_config_warning='';self._sync_model_fields();self.update_model_status()
+            self.load_profile(self.data_dir/'session.json');self._apply_studio_controls(self.saved,saved['broadcast-settings.json'])
+            self._message('Studio settings imported and reloaded. Credentials remain inactive; nothing was started. '+str(len(missing))+' missing paths retained.')
+        except Exception as error:self._message('Could not import studio settings: '+str(error))
 
     def _button(self, label, slot, primary=False):
         button = QPushButton(label); button.clicked.connect(slot)
@@ -188,7 +267,7 @@ class MainWindow(QMainWindow):
         self.time_label=QLabel('0:00 / 0:00'); playback.addWidget(self.time_label); playback.addStretch(); monitor.addLayout(playback)
         detail.addWidget(self.monitor_panel)
         self.tabs=QTabWidget(); self.tabs.setAccessibleName('Operator settings'); detail.addWidget(self.tabs,1)
-        self._appearance_tab(); self._lyrics_tab(); self._broadcast_tab(); self._models_tab()
+        self._appearance_tab(); self._lyrics_tab(); self._broadcast_tab(); self._models_tab(); self._studio_backup_tab()
         self.tabs.currentChanged.connect(self._operator_tab_changed)
         split.addWidget(right); split.setSizes([410,900]); layout.addWidget(split,1); self.setCentralWidget(root)
 
@@ -224,20 +303,22 @@ class MainWindow(QMainWindow):
         # Save/review actions stay visible while the transcript and notes scroll.
         scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body=QWidget(); content=QVBoxLayout(body); content.setContentsMargins(0,0,6,0)
+        self.assisted_review_button=self._button('Review-assisted lyrics…', self.open_assisted_review, True); self.assisted_review_button.setToolTip('Private audio preview, Qwen extraction, reviewed-text alignment, reversible corrections and explicit approval. Previous Heart / CTC engine remains selectable.'); content.addWidget(self.assisted_review_button)
+        self.sheet_button=self._button('Lyrics sheet…',lambda:self.open_assisted_review(sheet=True));content.addWidget(self.sheet_button)
         self.prepare_actions=QWidget(); row=QHBoxLayout(self.prepare_actions); row.setContentsMargins(0,0,0,0); self.import_button=self._button('Import timed lyrics',self.import_lyrics); row.addWidget(self.import_button); self.extract_button=self._button('Extract & align',lambda:self.queue_extraction(False)); row.addWidget(self.extract_button); self.batch_button=self._button('Prepare missing',self.queue_missing); row.addWidget(self.batch_button); content.addWidget(self.prepare_actions)
         self.preparation_progress=QWidget(); row=QHBoxLayout(self.preparation_progress); row.setContentsMargins(0,0,0,0); self.extract_progress=QProgressBar(); self.extract_progress.setValue(0); self.extract_progress.setAccessibleName('Lyric extraction progress'); row.addWidget(self.extract_progress,1); self.cancel_extract=self._button('Cancel',self.cancel_extraction); self.cancel_extract.setEnabled(False); row.addWidget(self.cancel_extract); self.preparation_progress.hide(); content.addWidget(self.preparation_progress)
         self.lyrics_splitter=QSplitter(Qt.Orientation.Vertical); self.lyrics_splitter.setAccessibleName('Resize lyric editor and review notes'); self.lyrics_splitter.setChildrenCollapsible(False)
         notes=QWidget(); notes_layout=QVBoxLayout(notes); notes_layout.setContentsMargins(0,0,0,0)
         notes_title=QLabel('Review notes · original automatic findings'); notes_layout.addWidget(notes_title)
         self.review_notes=QPlainTextEdit(); self.review_notes.setReadOnly(True); self.review_notes.setAccessibleName('Stored lyric review notes, timestamps and passage context'); self.review_notes.setMinimumHeight(75); self.review_notes.setPlainText(stored_review_notes(None)); notes_layout.addWidget(self.review_notes); self.lyrics_splitter.addWidget(notes)
-        self.lyric_text=TimedLyricsEditor(); self.lyric_text.edited.connect(self._lyric_edited); self.lyrics_splitter.addWidget(self.lyric_text); self.lyrics_splitter.setStretchFactor(1,1); self.lyrics_splitter.setSizes([100,300]); content.addWidget(self.lyrics_splitter,1)
+        self.lyric_text=TimedLyricsEditor(); self.lyric_text.edited.connect(self._lyric_edited); self.lyric_views=QStackedWidget();self.lyric_views.addWidget(self.lyric_text);self.untimed_sheet_view=QPlainTextEdit();self.untimed_sheet_view.setReadOnly(True);self.untimed_sheet_view.setAccessibleName('Untimed library lyrics; edit with Lyrics sheet');self.lyric_views.addWidget(self.untimed_sheet_view);self.lyrics_splitter.addWidget(self.lyric_views); self.lyrics_splitter.setStretchFactor(1,1); self.lyrics_splitter.setSizes([100,300]); content.addWidget(self.lyrics_splitter,1)
         row=QHBoxLayout(); self.add_line_button=self._button('Add line',self._add_lyric_line); row.addWidget(self.add_line_button); self.remove_line_button=self._button('Remove line',self.lyric_text.remove_lines); row.addWidget(self.remove_line_button); self.line_timing_button=self._button('Line timing',self._use_line_timing); self.line_timing_button.setToolTip('Remove word highlights from selected lines; keep their text and line times. Useful for uncertain word timing.'); row.addWidget(self.line_timing_button); self.realign_button=self._button('Align text',self._align_edited_lyrics); self.realign_button.setToolTip('Optional full-recording re-alignment of saved text for new word highlights. Edited lines already work with line timing. Requires local models; new results need review.'); row.addWidget(self.realign_button); content.addLayout(row)
         self.lyric_options=self._button('More lyric options',self._toggle_lyric_options); content.addWidget(self.lyric_options)
         self.lyric_options_panel=QWidget(); options=QVBoxLayout(self.lyric_options_panel); options.setContentsMargins(0,0,0,0)
         self.reference=QPlainTextEdit(); self.reference.setPlaceholderText('Optional complete lyric sheet. To correct a prepared transcript, edit its lines above.'); self.reference.setAccessibleName('Optional complete lyric sheet for alignment'); self.reference.setMinimumHeight(80); self.reference.setMaximumHeight(180); options.addWidget(self.reference)
         self.align_button=self._button('Align supplied sheet',lambda:self.queue_extraction(True)); options.addWidget(self.align_button)
         row=QHBoxLayout(); self.offset=QDoubleSpinBox(); self.offset.setRange(-15,15); self.offset.setSingleStep(.1); self.offset.setDecimals(1); self.offset.setSuffix(' s'); self.offset.setAccessibleName('Move lyric highlights earlier or later'); self.offset.valueChanged.connect(self.stage.set_offset); row.addWidget(QLabel('Preview timing adjustment')); row.addWidget(self.offset); row.addWidget(self._button('Reset',lambda:self.offset.setValue(0))); options.addLayout(row)
-        self.allow_drafts=QCheckBox('Preview unapproved saved lyrics on Program Output'); self.allow_drafts.setChecked(True); self.allow_drafts.toggled.connect(self._draft_preview_toggled); options.addWidget(self.allow_drafts)
+        self.publication_notice=QLabel('Program Output and recordings show only lyrics approved here for this exact recording. Draft listening stays in Review-assisted lyrics. Website publication is separate.');self.publication_notice.setWordWrap(True);options.addWidget(self.publication_notice)
         self.lyric_options_panel.hide(); content.addWidget(self.lyric_options_panel)
         scroll.setWidget(body); v.addWidget(scroll,1)
         self.lyric_save_status=QLabel('Edits are saved per recording. Automatic preparation does not approve lyrics.'); self.lyric_save_status.setWordWrap(True); self.lyric_save_status.setAccessibleName('Lyric save and review status'); self.lyric_save_status.setTextFormat(Qt.TextFormat.PlainText); v.addWidget(self.lyric_save_status)
@@ -366,7 +447,7 @@ class MainWindow(QMainWindow):
         self.advanced_model_options=QWidget(); advanced_layout=QVBoxLayout(self.advanced_model_options); advanced_layout.setContentsMargins(0,0,0,0); advanced_layout.addLayout(form)
         self.advanced_model_toggle=QCheckBox('Show advanced paths and recognition settings'); self.advanced_model_toggle.setAccessibleName('Show advanced paths and recognition settings'); self.advanced_model_toggle.toggled.connect(self.advanced_model_options.setVisible)
         v.addWidget(self.advanced_model_toggle); v.addWidget(self.advanced_model_options); self.advanced_model_options.hide()
-        v.addWidget(self._button('Save model settings',self.save_model_settings)); self.model_status=QLabel(''); self.model_status.setWordWrap(True); v.addWidget(self.model_status)
+        v.addWidget(self._button('Save model settings',self.save_model_settings)); v.addWidget(self._button('Export model settings…',self.export_model_settings)); v.addWidget(self._button('Import model settings…',self.import_model_settings)); self.model_status=QLabel(''); self.model_status.setWordWrap(True); v.addWidget(self.model_status)
         note=QLabel('Playback does not require AI models. Extraction uses a separate local Python runtime so heavy work stays outside the player. Configure your installed runtime and models here; local settings are restored on later launches.'); note.setWordWrap(True); note.setObjectName('muted'); v.addWidget(note); v.addStretch(); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page); self.tabs.addTab(scroll,'Lyric models'); self.update_model_status()
 
     def _connect(self):
@@ -456,6 +537,7 @@ class MainWindow(QMainWindow):
         task.failed.connect(failed)
     def _remember_document(self,track,document):
         key=str(track.path)
+        self._publication_revisions.pop(key,None)
         if document:
             self.documents[key]=document; self._invalid_lyrics.discard(key)
             if getattr(document,'_storage_path',None):self._lyric_locations[key]=Path(document._storage_path)
@@ -465,6 +547,9 @@ class MainWindow(QMainWindow):
                     # Small lyric files use bounded byte hashes. Metadata can
                     # coalesce same-tick writes and can settle during playback.
                     self._lyric_file_stamps[key]=lyric_content_revision(location)
+                    persisted=load_lyrics(location)
+                    if is_approved(persisted) and persisted.to_dict()==document.to_dict():
+                        self._publication_revisions[key]=persisted.human_review['document_revision']
                 except (OSError,ValueError):self._lyric_file_stamps.pop(key,None)
             try:self._lyric_stamps[key]=(track.path.stat().st_size,track.path.stat().st_mtime_ns)
             except OSError:self._invalid_lyrics.add(key)
@@ -508,13 +593,16 @@ class MainWindow(QMainWindow):
     def _document_ready(self,track,document):
         key=str(track.path)
         if not document or key in self._lyric_buffers or not is_approved(document):return False
+        if self._publication_revisions.get(key)!=document.human_review.get('document_revision'):return False
         if self._extract_current and self._extract_current.path==track.path:return False
         return self._matches_recording(track,document)
+    def _program_publication_valid(self,document):
+        track=self.engine.current_track
+        return bool(track and document.segments and self._document_ready(track,document))
     def _update_program_lyrics(self,track,document):
         if self.engine.current_track and self.engine.current_track.path==track.path:
             safe=self._document_ready(track,document)
-            preview=self.allow_drafts.isChecked() and str(track.path) not in self._lyric_buffers and self._matches_recording(track,document)
-            self.stage.set_lyrics(document if safe or preview else None)
+            self.stage.set_lyrics(document if safe else None)
     def _display_document(self,track,document):
         self.lyric_text.commit_pending_edit()
         key=str(track.path); changed_track=not self._editor_track or self._editor_track.path!=track.path
@@ -541,6 +629,11 @@ class MainWindow(QMainWindow):
             self.lyric_status.setText(track.title+' · No prepared lyrics for this recording yet.')
             self.lyric_text.set_rows(buffer['rows']) if buffer else self.lyric_text.set_document(None)
             self.lyric_save_status.setText('Unsaved changes retained; the saved recording or lyrics are unavailable.' if buffer else 'Import timed lyrics or use Extract & align to create a saved draft.')
+        text=document.untimed_text if document else ''
+        self.untimed_sheet_view.setPlainText(text);self.lyric_views.setCurrentIndex(1 if text else 0)
+        if text:
+            self.lyric_status.setText(track.title+' · Untimed lyrics — no synchronized highlighting.')
+            self.lyric_save_status.setText('Saved untimed sheet. Use Lyrics sheet… to edit; alignment is optional. No synchronized output.')
         self.review_notes.setPlainText(stored_review_notes(document))
         self.prepare_actions.setVisible(not document or not document.segments or not self.lyric_options_panel.isHidden())
         self._update_program_lyrics(track,document)
@@ -558,10 +651,6 @@ class MainWindow(QMainWindow):
         self.documents.pop(str(t.path),None)
         if self.engine.current_track and self.engine.current_track.path==t.path:self.stage.set_lyrics(None)
         self._load_track_lyrics(t)
-    def _draft_preview_toggled(self,checked):
-        track=self.engine.current_track
-        if track:self._update_program_lyrics(track,self.documents.get(str(track.path)))
-        self._schedule_save()
     def _selection_changed(self,current,previous):
         self._recovery_generation+=1
         self._update_recovery_action()
@@ -597,7 +686,7 @@ class MainWindow(QMainWindow):
         track=self._editor_track; document=self._editor_document
         key=str(track.path) if track else None
         busy=bool(key in self._saving_lyrics or (track and self._extract_current and self._extract_current.path==track.path))
-        editable=bool(document)
+        editable=bool(document and not document.untimed_text)
         available=bool(document and document.segments)
         buffer=self._lyric_buffers.get(key)
         self.lyric_text.setEnabled(editable and not busy)
@@ -812,7 +901,7 @@ class MainWindow(QMainWindow):
         self._queue_extract([(track,'\n'.join(cue.text for cue in document.segments))])
 
     def _has_lyrics(self,track):
-        return self._lyric_state(track)=='LYRICS READY'
+        return self._lyric_state(track) in ('LYRICS READY','INSTRUMENTAL REVIEWED')
     def _lyric_state(self,track):
         key=str(track.path)
         if key in self._invalid_lyrics:return 'MUSIC ONLY'
@@ -824,6 +913,8 @@ class MainWindow(QMainWindow):
         if document is None and self.lyric_files.get(key):
             try: document=load_lyrics(self.lyric_files[key]); self._remember_document(track,document)
             except (OSError,ValueError,TypeError): return 'MUSIC ONLY'
+        if document and document.untimed_text:return 'UNTIMED LYRICS'
+        if document and document.metadata.get('instrumental') is True and not document.segments and self._document_ready(track,document):return 'INSTRUMENTAL REVIEWED'
         if not document or not document.segments:return 'MUSIC ONLY'
         return 'LYRICS READY' if self._document_ready(track,document) else 'LYRICS NEED REVIEW'
     def _playlist_text(self,track):
@@ -885,13 +976,12 @@ class MainWindow(QMainWindow):
         settings=data.get('settings',{}); self.brand.setText(settings.get('brand','GOODNEIGHBOR BLUES')); self.tagline.setText(settings.get('tagline','Original blues. Stay awhile.'))
         self.interval.setValue(max(5,min(300,int(settings.get('interval_seconds',18)))))
         for key,widget in [('motion',self.motion),('waveform',self.wave),('lyrics',self.lyrics_visible)]:widget.setChecked(bool(settings.get(key,True)))
-        # This preference belongs to the station profile/session. A legacy
-        # playlist without it keeps the operator's current choice; explicit
-        # false must survive loading, track selection and prepared results.
+        # Preserve the historical profile value without letting it bypass the
+        # mandatory local approval gate. No migration changes user lyric files.
         preview=settings.get('preview_unapproved_lyrics')
-        if isinstance(preview,bool):self.allow_drafts.setChecked(preview)
+        if isinstance(preview,bool):self._legacy_draft_preview_preference=preview
         self.set_waveform_color(settings.get('waveform_color',DEFAULT_WAVEFORM_COLOR))
-        self.documents.clear();self._lyric_stamps.clear();self._invalid_lyrics.clear();self.engine.set_queue([],preserve_current=False); self.ready_only.setChecked(bool(data.get('settings',{}).get('lyrics_ready_only',False))); self._apply_queue(); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self.apply_appearance()
+        self.documents.clear();self._publication_revisions.clear();self.stage.set_lyrics(None);self._lyric_stamps.clear();self._invalid_lyrics.clear();self.engine.set_queue([],preserve_current=False); self.ready_only.setChecked(bool(data.get('settings',{}).get('lyrics_ready_only',False))); self._apply_queue(); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self.apply_appearance()
         self._message(f'{self.profile_name}: {len(self.all_tracks)} recordings and {len(self.lyric_files)} prepared lyric files loaded.')
     def save_playlist(self):
         name,_=QFileDialog.getSaveFileName(self,'Save playlist',self.profile_name+'.json','Station playlist (*.json);;M3U playlist (*.m3u)')
@@ -904,7 +994,7 @@ class MainWindow(QMainWindow):
     def add_backgrounds(self):
         paths,_=QFileDialog.getOpenFileNames(self,'Add artwork or looping video','','Artwork and video ('+' '.join('*'+x for x in sorted(IMAGE_SUFFIXES|VIDEO_SUFFIXES))+')')
         self.backgrounds=list(dict.fromkeys(self.backgrounds+[Path(p).resolve() for p in paths])); self.stage.set_backgrounds(self.backgrounds); self.art_count.setText(f'{len(self.backgrounds)} artwork / video backdrops'); self._schedule_save()
-    def visual_settings(self):return {'brand':self.brand.text(),'tagline':self.tagline.text(),'interval_seconds':self.interval.value(),'motion':self.motion.isChecked(),'waveform':self.wave.isChecked(),'waveform_color':self._waveform_color,'lyrics':self.lyrics_visible.isChecked(),'lyrics_ready_only':self.ready_only.isChecked(),'preview_unapproved_lyrics':self.allow_drafts.isChecked()}
+    def visual_settings(self):return {'brand':self.brand.text(),'tagline':self.tagline.text(),'interval_seconds':self.interval.value(),'motion':self.motion.isChecked(),'waveform':self.wave.isChecked(),'waveform_color':self._waveform_color,'lyrics':self.lyrics_visible.isChecked(),'lyrics_ready_only':self.ready_only.isChecked(),'preview_unapproved_lyrics':self._legacy_draft_preview_preference}
     def _update_waveform_color_button(self):
         color=QColor(self._waveform_color)
         text='#101c24' if color.lightnessF()>.5 else '#ffffff'
@@ -928,6 +1018,32 @@ class MainWindow(QMainWindow):
     def _selected_track(self):
         item=self.playlist.currentItem()
         return next((t for t in self.all_tracks if item and str(t.path)==item.data(Qt.ItemDataRole.UserRole)),self.engine.current_track)
+    def open_assisted_review(self,*,supplied_text=None,prepare=False,sheet=False):
+        track=self._selected_track()
+        if not track:self._message('Select a recording first.'); return
+        if self.export.running or self.engine.playing:
+            self._message('Pause Program playback and stop output before opening private lyric review.'); return
+        if self.extract_process.state()!=QProcess.ProcessState.NotRunning or self._extract_queue:
+            self._message('Finish or cancel existing lyric preparation first.'); return
+        self.lyric_text.commit_pending_edit()
+        if self._lyric_buffers or self._saving_lyrics:
+            self._message('Save or reload pending lyric edits before opening private review.'); return
+        try:
+            from .review_dialog import LyricsReviewDialog
+            dialog=LyricsReviewDialog(track,self.data_dir,self.extract_config.cache_dir,self._find_document(track),self)
+            if supplied_text is not None:
+                dialog._section_index=-1;dialog.section_select.hide()
+                dialog.reference.setPlainText(supplied_text)
+            if prepare:
+                dialog.preparation.show();dialog.prepare_button.setText('Hide preparation')
+                dialog.status.setText('Extracting and aligning automatically. Existing published lyrics stay unchanged until explicit approval.')
+                if supplied_text is None:QTimer.singleShot(0,dialog.begin_automatic)
+                else:dialog.supplied_options.setChecked(True)
+            if sheet:QTimer.singleShot(0,dialog.open_sheet)
+            dialog.approved.connect(lambda path,doc:self._lyrics_ready(track,path,doc))
+            dialog.exec()
+        except (OSError,ValueError) as error:self._message('Could not open review: '+str(error))
+
     def import_lyrics(self):
         track=self._selected_track()
         if not track:return
@@ -964,8 +1080,9 @@ class MainWindow(QMainWindow):
         if not track:self._message('Choose a recording first.'); return
         text=self.reference.toPlainText().strip() if reference else ''
         if reference and not text:self._message('Paste the exact lyric sheet before aligning it.'); return
-        self._queue_extract([(track,text)])
-    def queue_missing(self):self._queue_extract([(t,'') for t in self.all_tracks if not self.lyric_files.get(str(t.path)) and str(t.path) not in self.documents])
+        self.open_assisted_review(supplied_text=text if reference else None,prepare=True)
+    def queue_missing(self):
+        self._message('The new Qwen workflow reviews one recording at a time. Select a recording and use Extract & align. No automatic whole-library job was started; previous engine settings and saved drafts remain available.')
     def _queue_extract(self,jobs):
         if self.export.running:self._message('Stop the output before preparing lyrics. Playback can continue.'); return
         if any(str(track.path) in self._lyric_buffers or str(track.path) in self._saving_lyrics for track,_ in jobs):
@@ -1134,8 +1251,39 @@ class MainWindow(QMainWindow):
                 else:explicit.discard(key)
             values['explicit_paths']=sorted(explicit)
             self.extract_config,self._model_resolution_report=resolve_existing_models(ExtractionConfig.from_dict(values))
-            self._edited_model_paths.clear(); self._model_config_warning=''; self._sync_model_fields(); self.update_model_status(); self._schedule_save(); return True
+            self._persist_model_settings()
+            self._edited_model_paths.clear(); self._model_config_warning=''; self._sync_model_fields(); self.update_model_status(); return True
         except Exception as error:self._message(str(error)); return False
+    def export_model_settings(self):
+        name,_=QFileDialog.getSaveFileName(self,'Export model settings (no broadcast credentials)',str(Path.home()/'broadcast-model-settings.json'),'JSON settings (*.json)')
+        if not name:return
+        if Path(name).resolve()==self.settings_file.resolve():
+            self._message('Choose a separate backup file, not the live settings file.');return
+        if not self.save_model_settings():return
+        try:
+            export_model_preferences(name,self.extract_config.to_dict())
+            self._message('Model settings exported. Broadcast credentials and playlists are not included.')
+        except Exception as error:self._message('Could not export model settings: '+str(error))
+
+    def import_model_settings(self):
+        name,_=QFileDialog.getOpenFileName(self,'Import model settings',str(Path.home()),'JSON settings (*.json)')
+        if not name:return
+        try:
+            config=import_model_preferences(name)
+            saved=save_model_preferences(self.settings_file,self._saved_model_values,config.to_dict())
+            self.extract_config=ExtractionConfig.from_dict(saved)
+            self._saved_model_values=deepcopy(saved)
+            _,self._model_resolution_report=resolve_existing_models(self.extract_config)
+            self._edited_model_paths.clear();self._model_config_warning=''
+            self._sync_model_fields();self.update_model_status()
+            self._message('Model settings imported and saved.')
+        except Exception as error:self._message('Could not import model settings: '+str(error))
+
+    def _persist_model_settings(self):
+        saved = save_model_preferences(self.settings_file, self._saved_model_values, self.extract_config.to_dict())
+        self._saved_model_values = deepcopy(saved)
+        self.extract_config = ExtractionConfig.from_dict(saved)
+
     def _sync_model_fields(self):
         for key,entry in self.model_fields.items():entry.setText(str(getattr(self.extract_config,key)))
         self.gpu.setChecked(self.extract_config.use_gpu)
@@ -1162,7 +1310,10 @@ class MainWindow(QMainWindow):
         values['explicit_paths']=sorted(explicit)
         self.extract_config,self._model_resolution_report=resolve_existing_models(ExtractionConfig.from_dict(values))
         self._edited_model_paths.clear();self._model_config_warning='';self._sync_model_fields();self.update_model_status()
-        if self.save_session():self._message('Model settings saved. Selected recognizer: '+self.extract_config.engine)
+        try:
+            self._persist_model_settings(); self._sync_model_fields()
+            self._message('Model settings saved. Selected recognizer: '+self.extract_config.engine)
+        except Exception as error:self._message('Could not save model settings: '+str(error))
     def update_model_status(self):
         status=config_status(self.extract_config)
         self.processing_status.setText('Saved processing choices · '+ ' · '.join(name.capitalize()+': '+value for name,value in status.get('processing_plan',{}).items()))
@@ -1389,11 +1540,9 @@ class MainWindow(QMainWindow):
         if hasattr(self,'save_timer'):self.save_timer.start(600)
     def save_session(self):
         try:
-            write_profile(self.data_dir/'session.json',self.all_tracks,self.backgrounds,self.lyric_files,self.visual_settings(),self.profile_name)
-            try:settings=json.loads(self.settings_file.read_text())
-            except (OSError,ValueError):settings={}
-            if not isinstance(settings,dict):settings={}
-            settings['extraction']=self.extract_config.to_dict(); atomic_json(self.settings_file,settings)
+            with studio_lock(self.data_dir):
+                data=snapshot_session(self.data_dir,self.all_tracks,self.backgrounds,self.lyric_files,self.visual_settings(),self.profile_name)
+                atomic_json(self.data_dir/'session.json',data)
             return True
         except Exception as error:self._message('Could not save session: '+str(error));return False
     def keyPressEvent(self,event):

@@ -20,7 +20,7 @@ def qapp():
 
 @pytest.fixture
 def stage(qapp):
-    widget=BroadcastStage()
+    widget=BroadcastStage(publication_guard=lambda document:True)
     yield widget
     widget.shutdown()
     widget.close()

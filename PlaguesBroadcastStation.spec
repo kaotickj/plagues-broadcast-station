@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import copy_metadata
 root = Path(SPECPATH)
 package = root / "src" / "gnb_player"
 worker_data = [(str(package / name), "gnb_player")
-               for name in ("extract_worker.py", "extraction.py", "lyrics.py", "lyric_timing.py", "recognition_drafts.py", "model_install.py",
+               for name in ("review_worker.py", "review_backend.py", "review_capture.py", "review_repetition.py", "review_partial.py", "alignment_contract.py", "supplied_text_contract.py", "recognition_policy.py", "review_qwen_worker.py", "qwen_review_backend.py", "qwen_review_contract.py", "review_device.py", "extract_worker.py", "extraction.py", "lyrics.py", "lyric_timing.py", "recognition_drafts.py", "model_install.py",
                             "model_install_worker.py", "model_discovery.py")]
 worker_data += [(str(path), "gnb_player/extraction_backend")
                 for path in sorted((package / "extraction_backend").glob("*.py"))]
