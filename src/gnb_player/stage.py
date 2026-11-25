@@ -4,6 +4,8 @@ The same painter serves the operator preview, presentation window and encoder.
 No controls or file paths are painted into the broadcast output.
 """
 from __future__ import annotations
+from .lyrics import word_is_active, cue_is_active
+from .review_partial import partial_tokens
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,14 @@ from PySide6.QtWidgets import QWidget
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi"}
 BASE_W, BASE_H = 1280.0, 720.0
+DEFAULT_WAVEFORM_COLOR = "#dfbd7f"
+
+
+def waveform_color(value: Any) -> str:
+    """Normalize profile colors to an opaque RGB value, with a legacy default."""
+    color = QColor(value) if isinstance(value, str) else QColor()
+    return color.name() if color.isValid() else DEFAULT_WAVEFORM_COLOR
+
 
 
 @dataclass
@@ -45,6 +55,22 @@ def _finite(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def lyric_token_words(cue):
+    """Pure layout input: validated untimed tokens get no underline target."""
+    text = str(_get(cue, 'text', ''))
+    measured = list(_get(cue, 'words', []) or [])
+    try:
+        mapping = partial_tokens(cue)
+    except (ValueError, TypeError, AttributeError):
+        return [(token, None) for token in text.split()]
+    if mapping is not None:
+        return [(token, measured[index] if index is not None else None) for token, index in mapping]
+    normalize = lambda s: ' '.join(str(s).split())
+    if normalize(' '.join(str(_get(w, 'text', '')) for w in measured)) == normalize(text):
+        return [(str(_get(w, 'text', '')), w) for w in measured]
+    return [(token, None) for token in text.split()]
+
+
 def _font(size: float, *, serif: bool = False, bold: bool = False) -> QFont:
     font = QFont("DejaVu Serif" if serif else "DejaVu Sans")
     font.setPixelSize(max(1, round(size)))
@@ -64,8 +90,11 @@ class BroadcastStage(QWidget):
     background_error = Signal(str)
     fullscreen_changed = Signal(bool)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, publication_guard=None) -> None:
         super().__init__(parent)
+        # All output paths fail closed without an explicitly supplied publication
+        # authority. MainWindow binds this to the current recording and saved file.
+        self._publication_guard=publication_guard or (lambda document:False)
         self.setWindowTitle("Goodneighbor Broadcast · Program Output")
         self.setObjectName("broadcastProgramOutput")
         self.setAccessibleName("Clean broadcast program output")
@@ -75,7 +104,8 @@ class BroadcastStage(QWidget):
         self._settings: dict[str, Any] = {
             "brand": "GOODNEIGHBOR BLUES", "tagline": "Original blues. Stay awhile.",
             "interval_seconds": 18.0, "fade_seconds": 1.8, "motion": True,
-            "waveform": True, "lyrics": True, "slideshow_paused": False,
+            "waveform": True, "waveform_color": DEFAULT_WAVEFORM_COLOR,
+            "lyrics": True, "slideshow_paused": False,
         }
         self._title, self._artist, self._album = "", "", ""
         self._position, self._duration, self._playing = 0.0, 0.0, False
@@ -122,6 +152,7 @@ class BroadcastStage(QWidget):
         return self._backdrop.path
 
     def set_track(self, title: str, artist: str = "", album: str = "") -> None:
+        self._lyrics=None
         self._title, self._artist, self._album = str(title), str(artist), str(album)
         self._song_frame = None
         self._video_is_song = False
@@ -140,7 +171,14 @@ class BroadcastStage(QWidget):
 
     def set_lyrics(self, document: Any | None) -> None:
         self._lyrics = document
+        self._check_publication()
         self.update()
+
+    def _check_publication(self):
+        if self._lyrics is not None:
+            try:allowed=bool(self._publication_guard(self._lyrics))
+            except Exception:allowed=False
+            if not allowed:self._lyrics=None
 
     def set_offset(self, seconds: float) -> None:
         self._offset = max(-30.0, min(30.0, _finite(seconds)))
@@ -166,6 +204,7 @@ class BroadcastStage(QWidget):
         for key in self._settings:
             if key in kwargs:
                 self._settings[key] = kwargs[key]
+        self._settings["waveform_color"] = waveform_color(self._settings["waveform_color"])
         self._settings["brand"] = str(self._settings["brand"])[:120]
         self._settings["tagline"] = str(self._settings["tagline"])[:200]
         self._settings["interval_seconds"] = max(5.0, min(300.0, _finite(self._settings["interval_seconds"], 18)))
@@ -328,6 +367,7 @@ class BroadcastStage(QWidget):
         self.update()
 
     def render_frame(self, width: int, height: int) -> QImage:
+        self._check_publication()
         width, height = max(1, min(7680, int(width))), max(1, min(4320, int(height)))
         image = QImage(width, height, QImage.Format.Format_RGB32)
         image.fill(QColor("#081117"))
@@ -412,12 +452,13 @@ class BroadcastStage(QWidget):
         p.drawText(QRectF(1080, 37, 140, 28), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, text)
 
     def _lyric_rows(self) -> tuple[Any | None, str, str]:
+        self._check_publication()
         if self._lyrics is None:
             return None, "", ""
         segments = _get(self._lyrics, "segments", [])
         position = self.lyric_position
         for index, cue in enumerate(segments):
-            if _finite(_get(cue, "start")) <= position < _finite(_get(cue, "end")):
+            if cue_is_active(cue, position, self._lyrics):
                 return cue, str(_get(segments[index - 1], "text", "")) if index else "", str(_get(segments[index + 1], "text", "")) if index + 1 < len(segments) else ""
         next_index = next((i for i, c in enumerate(segments) if _finite(_get(c, "start")) > position), len(segments))
         before = str(_get(segments[next_index - 1], "text", "")) if next_index > 0 else ""
@@ -441,13 +482,8 @@ class BroadcastStage(QWidget):
             p.setPen(QColor("#e4c385"))
             p.drawText(QRectF(180, 283, 920, 94), Qt.AlignmentFlag.AlignCenter, "♪")
             return
-        text = str(_get(cue, "text", ""))
-        measured = list(_get(cue, "words", []) or [])
-        normalize = lambda s: " ".join(str(s).split())
-        # If imported words do not cover the line, retain exact line text and
-        # show line-level captions instead of misleading word highlights.
-        aligned = measured if normalize(" ".join(str(_get(w, "text", "")) for w in measured)) == normalize(text) else []
-        tokens = [str(_get(w, "text", "")) for w in aligned] if aligned else text.split()
+        token_words = lyric_token_words(cue)
+        tokens = [token for token, _ in token_words]
         if not tokens:
             return
         box = QRectF(173, 278, 934, 126)
@@ -463,7 +499,7 @@ class BroadcastStage(QWidget):
                 if row and row_width + space + width > box.width():
                     lines.append(row)
                     row, row_width, space = [], 0.0, 0.0
-                row.append((token, aligned[index] if aligned else None, width))
+                row.append((token, token_words[index][1], width))
                 row_width += width + space
             if row:
                 lines.append(row)
@@ -481,7 +517,7 @@ class BroadcastStage(QWidget):
             x = box.center().x() - total_width / 2
             for token, word, width in row:
                 start, end = _finite(_get(word, "start")), _finite(_get(word, "end"))
-                current = word is not None and start <= position < end
+                current = word is not None and word_is_active(word, position)
                 sung = word is not None and position >= end
                 p.setPen(QColor("#fff1cb") if current else QColor("#e9c78d") if sung else QColor("#d7d4cd"))
                 p.drawText(x, baseline, token)
@@ -514,9 +550,11 @@ class BroadcastStage(QWidget):
 
     def _draw_waveform(self, p: QPainter, rect: QRectF) -> None:
         middle = rect.center().y()
-        p.setPen(QPen(QColor(195, 162, 104, 70), 1))
+        color = QColor(self._settings["waveform_color"])
+        baseline = QColor(color); baseline.setAlpha(70)
+        p.setPen(QPen(baseline, 1))
         p.drawLine(rect.left(), middle, rect.right(), middle)
-        p.setPen(QPen(QColor("#dfbd7f"), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         count = len(self._wave_display)
         for i, raw in enumerate(self._wave_display):
             taper = .28 + .72 * math.sin(math.pi * (i + .5) / count)

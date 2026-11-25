@@ -8,6 +8,7 @@ import sys
 import uuid
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QThread, QTimer, Signal, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from .extraction import ExtractionConfig
+from .help_dialog import HelpDialog
 from .model_discovery import discover, discover_ollama, normalize_ollama_url
 from .model_install import create_plan, describe_plan, installer_command, save_plan
 
@@ -58,6 +60,7 @@ class ModelSetupDialog(QDialog):
         self.tasks = []
         self.result_config = None
         self.discovery = None
+        self._runtime_manually_selected = False
         self._busy = False
         self._cancelled = False
         self._events = None
@@ -65,8 +68,9 @@ class ModelSetupDialog(QDialog):
         self._event_buffer = b''
         self._result_file = None
         self.setWindowTitle('Set up lyric models · Plague’s Broadcast Station')
-        self.resize(1000, 780)
-        self.setMinimumSize(790, 620)
+        self.resize(920, 700)
+        self.setMinimumSize(680, 480)
+        self.help_dialog = None
         self.process = QProcess(self)
         self.process.finished.connect(self._finished)
         self.process.errorOccurred.connect(self._process_error)
@@ -79,19 +83,27 @@ class ModelSetupDialog(QDialog):
 
     def _button(self, title, slot):
         button = QPushButton(title)
-        button.setAccessibleName(title)
+        button.setAccessibleName(title.replace("&", ""))
         button.clicked.connect(slot)
         return button
 
     def _build(self):
         layout = QVBoxLayout(self)
-        heading = QLabel('GOOD WORDS. RIGHT ON TIME.')
+        heading = QLabel('Set up automatic lyric preparation')
         heading.setObjectName('masthead')
         layout.addWidget(heading)
-        intro = QLabel('Find compatible models already on this computer, or install the quality lyric bundle. '
-                       'The preferred recognizer is Whisper large-v3, with vocal separation, independent review, and word alignment.')
+        intro = QLabel('Playing music and broadcasting do not require lyric models. For automatic lyrics, '
+                       'first find existing models, then review what will be reused or installed. '
+                       'Ollama is optional and can be skipped.')
+        intro.setObjectName("model_setup_intro")
         intro.setWordWrap(True)
         layout.addWidget(intro)
+        self.next_step = QLabel('Step 1: Find existing models. Nothing is installed or saved when this window opens.')
+        self.next_step.setObjectName('model_setup_next_step')
+        self.next_step.setWordWrap(True)
+        self.next_step.setTextFormat(Qt.TextFormat.PlainText)
+        self.next_step.setAccessibleName('Next model setup step')
+        layout.addWidget(self.next_step)
         self.tabs = QTabWidget()
         self.tabs.setAccessibleName('Model setup steps')
         layout.addWidget(self.tabs, 1)
@@ -99,13 +111,15 @@ class ModelSetupDialog(QDialog):
         found = QWidget()
         body = QVBoxLayout(found)
         buttons = QHBoxLayout()
-        self.scan = self._button('Find existing models', self.start_scan)
-        self.add_folder = self._button('Add model folder…', self.choose_folder)
-        self.add_python = self._button('Choose Python…', self.choose_python)
+        self.scan = self._button('&Find existing models', self.start_scan)
+        self.scan.setToolTip('Inspect local model folders and compatible Python environments; no downloads or settings changes.')
+        self.add_folder = self._button('Add model f&older…', self.choose_folder)
+        self.add_python = self._button('Choose P&ython…', self.choose_python)
         for button in (self.scan, self.add_folder, self.add_python):
             buttons.addWidget(button)
         body.addLayout(buttons)
-        note = QLabel('Scans common model caches and folders you select. Existing models stay where they are.')
+        note = QLabel('Start with Find existing models. Then check the selected files and Python below. '
+                      'Existing models stay where they are. Advanced: add a model folder or choose a specific Python if discovery misses it.')
         note.setWordWrap(True)
         body.addWidget(note)
         form = QFormLayout()
@@ -114,7 +128,9 @@ class ModelSetupDialog(QDialog):
             combo = QComboBox()
             combo.setAccessibleName(title + ' model location')
             combo.setToolTip(purpose)
-            combo.addItem('Download if missing', '')
+            combo.setMinimumContentsLength(24)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.addItem('Install if missing (review first)', '')
             combo.currentIndexChanged.connect(self.refresh_plan)
             label = QLabel(title + '\n' + purpose)
             label.setBuddy(combo)
@@ -124,14 +140,19 @@ class ModelSetupDialog(QDialog):
         self.runtime.setAccessibleName('Python runtime for lyric models')
         self.runtime.addItem('Download compatible Python for this app' if os.name == 'nt' else 'Choose an installed Python 3.11–3.13', None)
         self.runtime.currentIndexChanged.connect(self.refresh_plan)
-        form.addRow('Model Python', self.runtime)
+        self.runtime.activated.connect(lambda _: setattr(self, '_runtime_manually_selected', True))
+        self.runtime.setMinimumContentsLength(30)
+        self.runtime.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        runtime_label = QLabel('Model &Python')
+        runtime_label.setBuddy(self.runtime)
+        form.addRow(runtime_label, self.runtime)
         body.addLayout(form)
         self.findings = QPlainTextEdit()
         self.findings.setReadOnly(True)
         self.findings.setAccessibleName('Discovery results and compatibility explanations')
         self.findings.setPlaceholderText('Choose Find existing models to inspect common model folders and Python runtimes.')
         body.addWidget(self.findings, 1)
-        self.tabs.addTab(found, '1 · Find models')
+        self._add_step(found, '1 · Find models')
 
         install = QWidget()
         box = QVBoxLayout(install)
@@ -142,15 +163,22 @@ class ModelSetupDialog(QDialog):
         row.addWidget(self.destination, 1)
         self.browse_destination = self._button('Choose install folder…', self.choose_destination)
         row.addWidget(self.browse_destination)
-        box.addWidget(QLabel('Install missing components in this folder:'))
+        explanation = QLabel('Review the plan below. Validate and use existing models needs no download when every component '
+                             'and a compatible environment are found. Install missing components can download files and packages; '
+                             'check its download estimate and free-space requirement first.')
+        explanation.setWordWrap(True)
+        box.addWidget(explanation)
+        box.addWidget(QLabel('User-local folder for any missing components:'))
         box.addLayout(row)
         self.plan_text = QPlainTextEdit()
         self.plan_text.setReadOnly(True)
         self.plan_text.setAccessibleName('Model installation plan, downloads and disk requirements')
         box.addWidget(self.plan_text, 1)
-        self.install = self._button('Install missing components', self.start_install)
+        self.install = self._button('&Install missing components', self.start_install)
+        self.install.setToolTip('Run the reviewed plan with downloads permitted. Existing player settings change only after successful validation.')
         self.install.setObjectName('primary')
-        self.reuse = self._button('Validate and use existing models', self.start_reuse)
+        self.reuse = self._button('&Validate and use existing models', self.start_reuse)
+        self.reuse.setToolTip('Validate all four selected local models with the selected compatible runtime, then save their locations. No downloads.')
         row = QHBoxLayout()
         row.addWidget(self.install)
         row.addWidget(self.reuse)
@@ -167,7 +195,7 @@ class ModelSetupDialog(QDialog):
         self.log.setMaximumBlockCount(500)
         self.log.setAccessibleName('Model setup progress details')
         box.addWidget(self.log, 1)
-        self.tabs.addTab(install, '2 · Review & install')
+        self._add_step(install, '2 · Review and install')
 
         ollama = QWidget()
         box = QVBoxLayout(ollama)
@@ -197,17 +225,47 @@ class ModelSetupDialog(QDialog):
         self.ollama_status.setTextFormat(Qt.TextFormat.PlainText)
         box.addWidget(self.ollama_status)
         box.addStretch()
-        self.tabs.addTab(ollama, '3 · Ollama (optional)')
+        self._add_step(ollama, '3 · Ollama (optional)')
 
         row = QHBoxLayout()
-        self.cancel_job = self._button('Cancel current setup', self.cancel_work)
+        self.help_button = self._button('&Help (F1)', self.open_help)
+        row.addWidget(self.help_button)
+        self.back = self._button('&Back', lambda: self.tabs.setCurrentIndex(max(0, self.tabs.currentIndex() - 1)))
+        self.next = self._button('&Next', lambda: self.tabs.setCurrentIndex(min(2, self.tabs.currentIndex() + 1)))
+        self.next.setToolTip('Review the next step. This button does not install or save anything.')
+        row.addWidget(self.back)
+        row.addWidget(self.next)
+        self.cancel_job = self._button('&Cancel current setup', self.cancel_work)
         self.cancel_job.setEnabled(False)
         row.addWidget(self.cancel_job)
         row.addStretch()
         self.done = self._button('Close', self.close)
         row.addWidget(self.done)
         layout.addLayout(row)
+        self.tabs.currentChanged.connect(self._update_navigation)
+        self.help_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F1), self)
+        self.help_shortcut.activated.connect(self.open_help)
         self.refresh_plan()
+        self._update_navigation()
+
+    def _add_step(self, page, title):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, title)
+
+    def _update_navigation(self):
+        self.back.setEnabled(not self._busy and self.tabs.currentIndex() > 0)
+        self.next.setEnabled(not self._busy and self.tabs.currentIndex() < self.tabs.count() - 1)
+
+    def open_help(self):
+        if self.help_dialog is None:
+            self.help_dialog = HelpDialog(self, data_dir=self.data_dir, topic='models')
+        self.help_dialog.show_topic('models')
+        self.help_dialog.show()
+        self.help_dialog.raise_()
+        self.help_dialog.activateWindow()
 
     def _task(self, fn, callback):
         task = DiscoveryTask(fn, self)
@@ -248,6 +306,7 @@ class ModelSetupDialog(QDialog):
         if self._busy or self.tasks:
             return
         self.findings.setPlainText('Checking model formats, Python packages and the local Ollama service…')
+        self.next_step.setText('Finding existing components. No installation or settings changes are made by this scan.')
         settings = self.config.to_dict()
         folders, pythons = tuple(self.extra_roots), tuple(self.python_paths)
         url = self.ollama_url.text().strip()
@@ -258,6 +317,7 @@ class ModelSetupDialog(QDialog):
     def _found(self, result):
         if result.cancelled:
             self.findings.setPlainText('Discovery cancelled; existing selections and settings were kept.')
+            self.next_step.setText('Scan cancelled. Existing selections are unchanged; Find existing models retries the scan.')
             return
         self.discovery = result
         descriptions = []
@@ -266,7 +326,7 @@ class ModelSetupDialog(QDialog):
             previous = combo.currentData() or getattr(self.config, key, '')
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem('Download if missing', '')
+            combo.addItem('Install if missing (review first)', '')
             for model in result.models:
                 if model.kind == kind and model.compatible:
                     combo.addItem(model.path, model.path)
@@ -278,7 +338,8 @@ class ModelSetupDialog(QDialog):
         self.runtime.blockSignals(True)
         self.runtime.clear()
         self.runtime.addItem('Download compatible Python for this app' if os.name == 'nt' else 'Choose an installed Python 3.11–3.13', None)
-        selected = first_compatible = first_supported = 0
+        selected = previous_supported = first_compatible = first_supported = 0
+        runtime_details = []
         for runtime in result.runtimes:
             if runtime.version.startswith(('3.11.', '3.12.', '3.13.')):
                 self.runtime.addItem(f'Python {runtime.version} · ' + ('reuse model environment' if runtime.compatible else 'create isolated environment') + ' · ' + runtime.path, runtime.to_dict())
@@ -288,10 +349,17 @@ class ModelSetupDialog(QDialog):
                 if runtime.compatible and not first_compatible:
                     first_compatible = index
                 if runtime.path == previous_runtime:
-                    selected = index
-            descriptions.append(f'Python {runtime.version or "unavailable"}: {runtime.reason} ({runtime.path})')
-        self.runtime.setCurrentIndex(selected or first_compatible or first_supported)
+                    previous_supported = index
+                    if runtime.compatible or self._runtime_manually_selected:
+                        selected = index
+            runtime_details.append(f'Python {runtime.version or "unavailable"}: {runtime.reason} ({runtime.path})')
+        self.runtime.setCurrentIndex(selected or first_compatible or previous_supported or first_supported)
         self.runtime.blockSignals(False)
+        chosen = self.runtime.currentData() or {}
+        if chosen:
+            descriptions.append('Selected lyric runtime: ' + chosen['path'] + (' — compatible existing environment; no package installation needed.' if chosen.get('compatible') else ' — base Python only; setup must create an isolated environment. System Python packages will not be modified.'))
+        descriptions.append('Other scan results are candidate diagnostics, not failures of the selected runtime/models:')
+        descriptions += runtime_details
         descriptions += [f'{model.path}: {model.reason}' for model in result.models if not model.compatible]
         descriptions += result.warnings
         if result.cancelled:
@@ -363,11 +431,21 @@ class ModelSetupDialog(QDialog):
                 lines.append('This drive needs more free space. Choose another installation folder.')
             self.plan_text.setPlainText('\n'.join(lines))
             self.install.setEnabled(not self._busy and summary['enough_space'])
-            self.reuse.setEnabled(not self._busy and bool(plan.runtime_python) and len(plan.reuse) == len(COMPONENTS))
+            ready = bool(plan.runtime_python) and len(plan.reuse) == len(COMPONENTS)
+            self.reuse.setEnabled(not self._busy and ready)
+            if not self._busy:
+                if ready:
+                    self.next_step.setText('Step 2: All components were found. Review the plan, then Validate and use existing models to save their locations without downloads.')
+                elif self.discovery is not None:
+                    self.next_step.setText('Step 2: Some components need installation. Review the plan and disk/download estimates before Install missing components, or add another local folder in Step 1.')
+                else:
+                    self.next_step.setText('Step 1: Find existing models first. Then review the plan; nothing downloads until Install missing components.')
         except (ValueError, OSError) as error:
             self.plan_text.setPlainText(str(error))
             self.install.setEnabled(False)
             self.reuse.setEnabled(False)
+            if not self._busy:
+                self.next_step.setText('Step 1: Find existing models, or choose an installed Python 3.11–3.13. The review panel explains what is still needed.')
 
     def start_install(self):
         self._start(True)
@@ -408,6 +486,7 @@ class ModelSetupDialog(QDialog):
             self.progress.setValue(0)
             self.log.clear()
             self.status.setText('Starting quality model setup…')
+            self.next_step.setText('Setup is running. Read progress below; Cancel current setup keeps the previous active model settings.')
             self.tabs.setCurrentIndex(1)
             self.poll.start()
             self.process.start(args[0], args[1:])
@@ -420,6 +499,7 @@ class ModelSetupDialog(QDialog):
                        *self.models.values()):
             widget.setEnabled(enabled)
         self.cancel_job.setEnabled(not enabled)
+        self._update_navigation()
         self.refresh_plan()
 
     def _read_events(self):
@@ -456,6 +536,7 @@ class ModelSetupDialog(QDialog):
         self._controls(True)
         if self._cancelled:
             self.status.setText('Setup cancelled. Previous model settings were kept; partial downloads can be reused on retry.')
+            self.next_step.setText('Cancelled. Previous model settings are still active. Review the plan to retry or Close.')
             return
         try:
             if code or not self._result_file or not self._result_file.is_file():
@@ -468,11 +549,17 @@ class ModelSetupDialog(QDialog):
             values = result.get('settings', result.get('config', result))
             if not isinstance(values, dict) or any(not isinstance(values.get(key), str) or not values[key] for key in ('python_path', *COMPONENTS)):
                 raise ValueError('Setup returned incomplete model locations; previous settings were kept.')
-            config = ExtractionConfig.from_dict({**self.config.to_dict(), **values, **self._ollama_values()})
+            # Installer results own model locations, never station processing
+            # preferences. Ignore legacy workers that returned use_gpu=False
+            # just because they created CPU Torch dependencies.
+            installed_keys = {'python_path', 'model_root', 'torch_home', 'engine', *COMPONENTS}
+            installed = {key: value for key, value in values.items() if key in installed_keys}
+            config = ExtractionConfig.from_dict({**self.config.to_dict(), **installed, **self._ollama_values()})
             config.cache_dir = str(self.data_dir / 'lyrics-cache')
             self._apply(config)
             self.progress.setValue(100)
             self.status.setText('Quality lyric models are ready. Their locations have been saved in the player.')
+            self.next_step.setText('Ready: model locations saved. Close setup and return to Lyrics to prepare a recording, then listen and review the result.')
         except (ValueError, OSError, TypeError) as error:
             self._failed(str(error))
 
@@ -491,6 +578,7 @@ class ModelSetupDialog(QDialog):
     def _failed(self, message):
         self.status.setText(str(message))
         self.log.appendPlainText(str(message))
+        self.next_step.setText('Action needed: read the message below. Previous active model settings are kept; fix the cause and retry, or Close.')
 
     def cancel_work(self):
         for task in self.tasks:

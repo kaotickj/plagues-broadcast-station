@@ -73,6 +73,19 @@ def test_real_ten_second_recording_has_synchronized_video_and_actual_tone(tmp_pa
     session.error.connect(errors.append);session.status.connect(messages.append)
     initial=QImage(640,360,QImage.Format.Format_RGB32);initial.fill(QColor('#112c37'))
     session.set_video_frame(initial);session.start(config)
+    # FFmpeg opens the video and audio inputs before the encoder's clock starts.
+    # Measure ten seconds of recording, excluding that variable startup latency.
+    ready_deadline=time.monotonic()+12
+    try:
+        while (session.running and not errors
+               and not any('Recording clean' in message for message in messages)
+               and time.monotonic()<ready_deadline):
+            app.processEvents();time.sleep(.02)
+        assert not errors,errors
+        assert any('Recording clean' in message for message in messages),'Encoder did not become ready within twelve seconds'
+    except BaseException:
+        session.stop();session.wait(12)
+        raise
     began=time.monotonic();sample=0;next_video=0
     while time.monotonic()-began<10 and session.running:
         count=960
@@ -130,3 +143,21 @@ def test_local_stream_refusal_is_bounded_reconnect_and_redacts_key():
         assert errors and all(secret not in text for text in errors+messages)
         assert session._snapshot()['reconnects']==1
         assert any('Reconnecting (1/1)' in text for text in messages)
+
+
+@pytest.mark.parametrize('bitrate', [1000, 28500, 50000, 100000])
+def test_kbps_bitrate_range_and_encoder_arguments_include_youtube_displayed_value(bitrate):
+    """Argument assembly only: never start an encoder or stream."""
+    config = BroadcastConfig(mode='stream', target='rtmps://stream.example.invalid/live/DUMMY', bitrate_kbps=bitrate)
+    config.validate()
+    args = build_command(config, 12345, 12346)
+    assert args[args.index('-b:v') + 1] == f'{bitrate}k'
+    assert args[args.index('-maxrate') + 1] == f'{bitrate}k'
+    assert args[args.index('-bufsize') + 1] == f'{bitrate * 2}k'
+    assert args[-1] == config.target
+
+
+@pytest.mark.parametrize('bitrate', [299, 100001, True, '28500', 28500.0])
+def test_out_of_range_or_noninteger_bitrate_is_rejected(bitrate):
+    with pytest.raises(ValueError, match='bitrate'):
+        BroadcastConfig(mode='stream', target='rtmps://stream.example.invalid/live/DUMMY', bitrate_kbps=bitrate).validate()

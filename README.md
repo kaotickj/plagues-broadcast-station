@@ -1,10 +1,16 @@
 # Plague's Broadcast Station
 
+Local release candidate **0.2.4rc2** combines the recording-bound review workflow,
+waveform colors and phase-scoped GPU scheduling. See
+[candidate acceptance and installation boundaries](docs/RELEASE_CANDIDATE.md).
+
 A Python desktop player for music livestreams: a rotating image/video backdrop, synchronized sing-along lyrics, and a calm waveform driven by the music actually playing. An operator window manages the show; a separate clean 16:9 Program Output window is ready for OBS capture. Local video recording and optional direct streaming use FFmpeg.
 
 The music, lyrics, waveform and broadcast view follow the same player clock. The player supports shuffle/repeat, seeking, playback controls and adjustable lyric offset. Background motion, lyric display and the visualizer can be adjusted separately. Lyric extraction runs outside the GUI process and can wait for available GPU capacity without stopping the music.
 
 ## Run a packaged build
+
+Linux releases also include a `.run` installer with a stable launcher, repeatable upgrades and rollback. Run it with the existing session's `--data-dir` on the first install; later upgrades remember that path. See [INSTALLER.md](INSTALLER.md) for commands, optional application-menu integration and compatibility limits. The installer never starts/stops the player or installs lyric models. Windows continues to use its ZIP package.
 
 Extract the entire platform ZIP and keep `PlaguesBroadcastStation` beside its `_internal` folder. On Linux run `PlaguesBroadcastStation` or `run-linux.sh`; on Windows run `PlaguesBroadcastStation.exe` or `run-windows.bat`. Python is bundled for ordinary playback; the optional AI model runtime is separate.
 
@@ -22,7 +28,9 @@ A media pack is separate from the application. Extract a pack and open its `prof
 
 An on-screen waveform is a visual response to the decoded audio, not microphone input. Background videos are silent to keep the song as the soundtrack. The operator controls and local file paths are kept out of the clean program picture.
 
-See [the OBS guide](docs/OBS.md) for scene and audio setup. No livestream is started merely by opening the app. Direct streaming requires an explicit start action and a destination/key supplied by the operator; stream keys are not saved in profiles.
+See [the OBS guide](docs/OBS.md) for scene and audio setup. No livestream is started merely by opening the app. Direct streaming requires an explicit start action and a destination/key supplied by the operator. Portable playlists and settings exclude stream credentials; Save profile keeps ordinary stream settings, with an explicit Remember stream key option for native protected storage as described in [Broadcast profiles](docs/BROADCAST_PROFILE.md).
+
+Development builds are identified explicitly in the version and Help. [Controlled-test readiness](docs/CONTROLLED_TEST_READINESS.md) describes the narrowly pinned RC10 hotfix verifier, private station snapshots and journaled code-only rollback. These tools do not grant installation approval, stop apps or restore user data automatically.
 
 ## Set up lyric models
 
@@ -38,9 +46,28 @@ Ollama models use a different format and role: an Ollama model tag is a text-mod
 
 Supported imports are segment/word JSON, LRC, SRT and WebVTT. JSON may contain measured word times for karaoke highlighting. Ordinary LRC/subtitle files remain line-timed; the app does not invent word timing from the text.
 
+The **Lyrics** tab shows saved review notes and an editable timed transcript. Correct a line, choose **Save lyrics**, then check the saved lyrics against the recording and choose **Approve for airing**. Automatic preparation never supplies human approval; only the approved recording and revision become **Lyrics Ready**. [The review and save guide](docs/lyrics-review.md) explains timing edits, recoverable history, and approval invalidation.
+
+Double-click a lyric cell or press F2 to edit. Save lyrics and Ctrl+S commit the
+current typed cell, then save the recording link before reporting success. Use
+**Expand editor** or drag the workspace dividers for more room. **Export lyrics…** exports a separate copy of the saved revision; save pending edits first.
+After failed automatic extraction, **Review recognition draft** opens a separate editable, untimed text draft with read-only original evidence. **Save draft text** preserves corrections independently of timed lyrics, approval and Program Output. [Recognition recovery](docs/RECOGNITION_RECOVERY.md) explains revision conflicts, reopening, cancellation and Linux storage support. Recovery UI wiring does not establish ASR accuracy.
+
+The operator window title includes the version so a stale shortcut is visible.
+Choose **Help** (F1) for running version/build details, basic usage, storage paths
+and troubleshooting. Topics and Ctrl+F search work offline; Broadcast help links to official YouTube encoder guidance. Closing Help leaves the Operator Desk open. Advanced model paths are behind an explicit disclosure; start with Set up / find models for guided setup.
+
+Recognition stays in transcription mode, with English as the default and no
+filename-derived prompt. Advanced recognition language and optional context are
+portable settings; explicit context can bias recognition and is empty by default.
+Raw decoder output, settings and review revisions are retained with newly prepared
+lyrics. Suspect openings/endings remain editable and are flagged rather than
+silently removed. Word confidence measures model certainty, not proof of the sung
+words; listening and human approval remain necessary.
+
 The included extraction routine separates the vocal, recognizes it with Whisper, aligns the words independently, and can perform a second model review. Use the model setup wizard to find compatible existing models or explicitly install the quality pack, or configure the separate runtime and local model folders manually. CPU mode works without a supported GPU; optional GPU tools and an advisory lock are configured explicitly. The app never downloads model weights on startup.
 
-Default model/cache folders live under the application's user data directory. The setup wizard configures the selected model Python and model locations after validation; existing manual settings remain available. The player itself does not need Torch. [Cancellation and output details](docs/lyrics-backend.md) explain the optional backend and environment settings. `requirements-lyrics.txt` is for a separate CPU model environment; its Torch/TorchAudio versions are pinned below 2.9 to retain the forced-alignment API.
+The Lyric models page checks existing shared Linux locations under `/var/lib/gnb-lyrics` and the known `/opt` runtimes for unset or legacy-default fields, while retaining portable user-local fallbacks. Custom locations remain selected; missing custom files get diagnostics. Blank component overrides display their automatic effective paths. See [model locations](docs/MODEL_LOCATIONS.md) for precedence and exact shared candidates. Discovery does not download or copy weights; the setup wizard performs separate runtime/model validation. The player itself does not need Torch.
 
 In a source checkout, FFmpeg and ffprobe must be on PATH for extraction and metadata probing. Native packages include FFmpeg and ffprobe executables with their dependencies for recording/direct streaming. Source runs require those tools on PATH. Existing timed lyric imports work without the model environment.
 
@@ -70,7 +97,7 @@ To select a particular profile:
 
 ## Build native packages
 
-Run `./build-linux.sh` on Linux or `./build-windows.ps1` in Windows PowerShell. These install build dependencies into `.venv`, run tests, then create a one-folder native package with PyInstaller. Keep the resulting folder intact. ZIPs are written under `artifacts/`.
+Run `./build-linux.sh` on Linux or `./build-windows.ps1` in Windows PowerShell. These install build dependencies into `.venv`, run tests, then create a one-folder native package with PyInstaller. Keep the resulting folder intact. ZIPs are written under `artifacts/`; Linux additionally produces a versioned `.run` installer, SHA-256 checksum and manifest with source/build identity.
 
 The GitHub Actions workflow builds Linux and Windows separately on standard hosted runners. It uses no GPU runners, model downloads, private media or livestream credentials. Packaged checks start the normal GUI and model setup wizard, exercise the installer worker's refusal to run without an explicit install action, and check bundled media tools. A Windows executable must be built on Windows; a successful Linux build is not evidence that a Windows build passed. Native build artifacts and test results should be checked before calling a release tested on that platform.
 
@@ -83,3 +110,7 @@ QT_QPA_PLATFORM=offscreen QT_MEDIA_BACKEND=ffmpeg .venv/bin/python -m pytest -q
 No public broadcast is used by the tests. Source media is read-only during playback and extraction. Extraction saves new local JSON atomically; failed/cancelled jobs preserve earlier lyric files, and successful replacement keeps their history.
 
 Third-party license texts, native-build version information and notices are included with the package. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including corresponding-source requirements when redistributing GPL-configured FFmpeg builds.
+
+**Save profile** in Broadcast saves ordinary server/picture/bitrate settings independently of playlists and keyring availability. Masked keys require explicit **Remember stream key in OS keyring**; complete private targets use protected storage only. Bitrate accepts 1,000–100,000 kbps, including 28,500. See [saved livestream profiles](docs/BROADCAST_PROFILE.md) for saved-state feedback, reload/cancel, Forget and backend requirements.
+
+See [Save lyrics and recording identity](docs/LYRICS_STORAGE_AND_SAVE.md) for automatic storage, import provenance, conflict protection and the separate website workflow.

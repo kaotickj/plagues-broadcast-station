@@ -203,6 +203,7 @@ def test_versioned_installer_runtime_is_discovered_only_after_completion(tmp_pat
     runtime = version / "runtime/Scripts/python.exe"
     runtime.parent.mkdir(parents=True)
     runtime.write_bytes(b"fixture executable; never run by this test")
+    runtime.chmod(0o755)
     with patch.object(discovery.shutil, "which", return_value=None):
         assert str(runtime) not in discovery.discover_python_paths(app_data=tmp_path)
         (version / "installation.complete.json").write_text(json.dumps({"settings": {"python_path": str(runtime)}}))

@@ -8,10 +8,15 @@ from PyInstaller.utils.hooks import copy_metadata
 root = Path(SPECPATH)
 package = root / "src" / "gnb_player"
 worker_data = [(str(package / name), "gnb_player")
-               for name in ("extract_worker.py", "extraction.py", "model_install.py",
+               for name in ("review_worker.py", "review_backend.py", "review_capture.py", "review_repetition.py", "review_partial.py", "alignment_contract.py", "supplied_text_contract.py", "recognition_policy.py", "review_qwen_worker.py", "qwen_review_backend.py", "qwen_review_contract.py", "review_device.py", "extract_worker.py", "extraction.py", "lyrics.py", "lyric_timing.py", "recognition_drafts.py", "model_install.py",
                             "model_install_worker.py", "model_discovery.py")]
 worker_data += [(str(path), "gnb_player/extraction_backend")
                 for path in sorted((package / "extraction_backend").glob("*.py"))]
+# Explicit operational readiness tools are data for an external Python; they
+# never run during packaging or normal player startup.
+readiness_data = [(str(root / "scripts" / name), "readiness_tools")
+                  for name in ("linux_installer.py", "rc10_hotfix.py", "rc10-neighbour-guard-policy.json",
+                               "controlled_activation.py", "station_snapshot.py")]
 assets = [(str(path), "assets") for path in (root / "assets").glob("*") if path.is_file()]
 assets += [(str(path), "gnb_player/assets")
            for path in (package / "assets").glob("*") if path.is_file()]
@@ -28,7 +33,14 @@ for command in ([ffmpeg, "-version"], [ffmpeg, "-L"], [ffprobe, "-version"]):
 notices = [(str(root / "THIRD_PARTY_NOTICES.md"), ".")]
 notices += [(str(path), "licenses") for path in (root / "licenses").glob("*.txt")]
 notices += [(str(license_dir / "FFmpeg-build-info.txt"), "licenses")]
-for package_name in ("PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6", "numpy", "pyinstaller"):
+credential_metadata = ["keyring", "jaraco.classes", "jaraco.context", "jaraco.functools", "more-itertools"]
+credential_imports = ["keyring.backends.Windows", "win32ctypes.pywin32.win32cred"] if sys.platform == "win32" else ["keyring.backends.SecretService", "secretstorage", "jeepney"]
+credential_metadata += ["pywin32-ctypes"] if sys.platform == "win32" else ["SecretStorage", "jeepney", "cryptography", "cffi", "pycparser"]
+# No alternate, chain, environment-selected or plaintext credential backends.
+credential_excludes = ["keyrings", "keyrings.alt", "keyring.backends.chainer", "keyring.backends.null",
+                       "keyring.backends.libsecret", "keyring.backends.kwallet", "keyring.backends.macOS"]
+credential_excludes += ["keyring.backends.SecretService", "secretstorage", "jeepney"] if sys.platform == "win32" else ["keyring.backends.Windows"]
+for package_name in ["PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6", "numpy", "pyinstaller", *credential_metadata]:
     notices += copy_metadata(package_name)
 
 
@@ -36,14 +48,14 @@ a = Analysis(
     [str(root / "launch.py")],
     pathex=[str(root / "src")],
     binaries=[(ffmpeg, "bin"), (ffprobe, "bin")],
-    datas=worker_data + assets + notices,
-    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtMultimedia"],
+    datas=worker_data + readiness_data + assets + notices,
+    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtMultimedia", *credential_imports],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
               "PySide6.QtPdf", "PySide6.QtPdfWidgets", "torch", "torchaudio", "demucs",
-              "faster_whisper", "transformers", "tensorflow"],
+              "faster_whisper", "transformers", "tensorflow", *credential_excludes],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

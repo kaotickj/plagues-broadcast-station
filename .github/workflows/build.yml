@@ -31,6 +31,8 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -76,7 +78,12 @@ jobs:
       - name: Run model-free tests
         run: python -m pytest -q
       - name: Build native standalone folder
-        run: python -m PyInstaller --clean --noconfirm PlaguesBroadcastStation.spec
+        shell: python
+        run: |
+          import os, subprocess, sys
+          if os.name != 'nt':
+              subprocess.run([sys.executable, 'scripts/build_linux_installer.py', '--record-source'], check=True)
+          subprocess.run([sys.executable, '-m', 'PyInstaller', '--clean', '--noconfirm', 'PlaguesBroadcastStation.spec'], check=True)
       - name: Smoke-test packaged binaries
         shell: python
         run: |
@@ -136,7 +143,7 @@ jobs:
           source = pathlib.Path('run-windows.bat' if os.name == 'nt' else 'run-linux.sh')
           target = pathlib.Path('dist/PlaguesBroadcastStation') / source.name
           shutil.copy2(source, target)
-          for name in ('README.md', 'THIRD_PARTY_NOTICES.md', 'requirements-lyrics.txt'):
+          for name in ('README.md', 'INSTALLER.md', 'THIRD_PARTY_NOTICES.md', 'requirements-lyrics.txt'):
               shutil.copy2(name, target.parent / name)
           shutil.copytree('docs', target.parent / 'docs', dirs_exist_ok=True)
       - name: Package build
@@ -145,9 +152,12 @@ jobs:
           import pathlib, shutil
           pathlib.Path('artifacts').mkdir(exist_ok=True)
           shutil.make_archive('artifacts/${{ matrix.artifact }}', 'zip', 'dist', 'PlaguesBroadcastStation')
+      - name: Package Linux installer
+        if: runner.os == 'Linux'
+        run: python scripts/build_linux_installer.py
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: artifacts/*.zip
+          path: artifacts/*
           if-no-files-found: error
           retention-days: 14

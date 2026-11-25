@@ -372,7 +372,9 @@ def controller(plan: InstallPlan, *, reuse_only: bool=False) -> dict:
         raise ValueError("Model validation did not produce a completed result; prior settings were preserved.")
     settings = json.loads(helper_result.read_text(encoding="utf-8"))
     settings.update({"python_path": runtime, "engine": "large-v3", "auto_review": True, "separate_vocals": True})
-    if not plan.runtime_python:settings['use_gpu']=False
+    # The primary Python supplies CPU dependencies, not the acceleration policy.
+    # Vulkan recognition and ROCm alignment use separately configured runtimes.
+    # Creating a CPU environment must not disable either existing GPU route.
     atomic_json(version_dir / "installation.complete.json", {"version": 1, "settings": settings, "created_at": time.time(), "profile": description["profile"]})
     return settings
 

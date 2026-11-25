@@ -1,15 +1,20 @@
 """Optional local Radeon acceleration; CPU recognizers remain installed."""
 from pathlib import Path
-import json,os,subprocess,math,re
-import threading
+import json,os,subprocess,math,re,hashlib
+import threading,time
+from copy import deepcopy
+try:
+    from .lyrics_recognition import recognition_policy
+except ImportError:
+    from lyrics_recognition import recognition_policy
 try:
     import fcntl
 except ImportError:
     fcntl=None
 from contextlib import contextmanager
 
-def configured_path(name):
-    value=os.environ.get(name,'')
+def configured_path(name, default=""):
+    value=os.environ.get(name,default)
     return Path(value) if value else None
 
 GPU_PYTHON=configured_path('GNB_LYRICS_GPU_PYTHON')
@@ -35,7 +40,7 @@ def capacity_values(percent,total,used):
 def enabled():
     if os.environ.get('GNB_LYRICS_GPU')!='1' or os.environ.get('GNB_GPU_HELPER_ACTIVE') or os.environ.get('GNB_LYRICS_GPU_BLOCKED'):return False
     state=capacity()
-    return bool(state['available'] and (not state['busy'] or os.environ.get('GNB_LYRICS_GPU_RESERVED')=='1') and VULKAN and VULKAN.is_file() and GGML and GGML.is_file())
+    return bool(state['available'] and (os.environ.get('GNB_LYRICS_PHASE_GPU')=='1' or not state['busy'] or os.environ.get('GNB_LYRICS_GPU_RESERVED')=='1') and VULKAN and VULKAN.is_file() and GGML and GGML.is_file())
 
 @contextmanager
 def reservation():
@@ -51,8 +56,11 @@ def reservation():
                 handle=os.open(lock,os.O_RDWR|getattr(os,'O_NOFOLLOW',0))
                 fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 os.environ['GNB_LYRICS_GPU_RESERVED']='1'
+            except BlockingIOError:
+                state={**state,'busy':True,'message':'Waiting for the shared GPU; another job holds the processing slot.'}
             except OSError:
-                state={**state,'busy':True,'message':'Waiting for the shared GPU; other rendering jobs have priority.'}
+                state={**state,'available':False,'busy':False,'coordination_unavailable':True,
+                       'message':'GPU coordination is unavailable; using CPU processing. Check access to the configured lock file.'}
         if lock and os.environ.get('GNB_LYRICS_GPU_RESERVED')!='1':os.environ['GNB_LYRICS_GPU_BLOCKED']='1'
         yield state
     finally:
@@ -61,13 +69,71 @@ def reservation():
             if value is None:os.environ.pop(key,None)
             else:os.environ[key]=value
 
+_phase_timings=[]
+
+def reset_gpu_timings():
+    _phase_timings.clear()
+
+def gpu_timings():
+    return [dict(row) for row in _phase_timings]
+
+
+class GpuCapacityDeferred(ValueError):
+    """A requested GPU phase is waiting; do not silently start CPU recognition."""
+
+
+@contextmanager
+def gpu_phase(progress, phase):
+    """Own the exclusive GPU lease only while a GPU subprocess is alive."""
+    if os.environ.get('GNB_LYRICS_PHASE_GPU')!='1':
+        yield
+        return
+    try: limit=max(0,min(3600,float(os.environ.get('GNB_LYRICS_GPU_WAIT_SECONDS','900'))))
+    except ValueError: limit=900
+    began=time.monotonic()
+    while True:
+        with reservation() as state:
+            if not state.get('available'):
+                message=(state['message'] if state.get('coordination_unavailable') else
+                         'GPU capacity is unavailable; using CPU processing.')
+                progress('preparing',0,message)
+                raise RuntimeError(message)
+            if not state.get('busy'):
+                acquired=time.monotonic()
+                progress(phase,0,f'GPU slot acquired after {max(0,int(acquired-began))}s. Starting this phase; CPU stages do not reserve it.')
+                try:
+                    yield
+                finally:
+                    _phase_timings.append({'phase':phase,'wait_seconds':round(acquired-began,3),'lease_seconds':round(time.monotonic()-acquired,3)})
+                    del _phase_timings[:-128]
+                return
+            if os.environ.get('GNB_LYRICS_GPU_WAIT','1')!='1':
+                progress('preparing',0,'GPU is busy; CPU fallback was explicitly selected.')
+                raise RuntimeError('GPU busy; CPU fallback explicitly selected.')
+            elapsed=max(0,time.monotonic()-began)
+            if elapsed>=limit:
+                progress('waiting',0,f'GPU wait limit reached after {int(elapsed)}s. This job remains deferred; existing lyrics are unchanged. Retry when the GPU is free.')
+                raise GpuCapacityDeferred('Waiting for the shared GPU. Existing lyrics are unchanged; the job can retry.')
+            remaining=max(0,math.ceil(limit-elapsed))
+            progress('waiting',0,state.get('message','Waiting for the shared GPU.')+
+                     f' Waited {int(elapsed)}s; {remaining}s until this attempt is deferred. Playback continues.')
+        time.sleep(min(2,max(.01,limit-(time.monotonic()-began))))
+
+
 def helper(operation,source,target,work,progress):
+    with gpu_phase(progress,'aligning' if operation=='align' else 'separating'):
+        return _helper_unlocked(operation,source,target,work,progress)
+
+
+def _helper_unlocked(operation,source,target,work,progress):
     script=Path(__file__).with_name('lyrics_gpu_helper.py')
     if not GPU_PYTHON or not GPU_PYTHON.is_file() or not script.is_file():raise RuntimeError('Configure the GPU helper Python before using GPU alignment.')
     env=os.environ.copy();env['GNB_GPU_HELPER_ACTIVE']='1'
+    progress('aligning' if operation=='align' else 'separating',0,
+             'Loading the ROCm GPU '+('word-alignment' if operation=='align' else 'vocal-separation')+' runtime.')
     log=work/('gpu-'+operation+'.log')
     with log.open('w') as errors:
-        process=subprocess.Popen([str(GPU_PYTHON),str(script),operation,str(source),str(target),str(work)],stdout=subprocess.PIPE,stderr=errors,text=True,env=env)
+        process=subprocess.Popen([str(GPU_PYTHON),str(script),operation,str(source),str(target),str(work)],stdout=subprocess.PIPE,stderr=errors,text=True,env=env,start_new_session=(os.name!='nt'))
         watchdog=threading.Timer(600,process.kill);watchdog.daemon=True;watchdog.start()
         try:
             for line in process.stdout:
@@ -94,6 +160,99 @@ def parse_words(data,offset=0):
         words.append({'text':text,'start':round(a,3),'end':round(b,3),'score':sum(scores)/len(scores)})
     return words
 
+class AlignmentRejected(ValueError):
+    """Measured CTC output must not replace a recording's saved lyric draft."""
+
+
+def alignment_rejection_diagnostic(words,aligned,duration,reason,index=None):
+    """Bounded numeric evidence only; lyric text and arbitrary metadata stay out.
+
+    Raw recognition is retained separately. Omitting text here also prevents
+    paths, credential-looking strings or decoder metadata from becoming an
+    accidental diagnostic disclosure.
+    """
+    def number(value):
+        if type(value) not in (int,float):return None
+        try:return value if math.isfinite(value) else None
+        except (OverflowError,ValueError):return None
+    def word(value):
+        if type(value) is not dict:return None
+        return {key:number(value.get(key)) for key in ('start','end','score','alignment_score')}
+    old=words if isinstance(words,(list,tuple)) else []
+    new=aligned if isinstance(aligned,(list,tuple)) else []
+    count=max(len(old),len(new))
+    index=index if type(index) is int and 0<=index<count else None
+    center=index if index is not None else 0
+    rows=[{'word_index':i,'word_number':i+1,
+           'original':word(old[i]) if i<len(old) else None,
+           'aligned':word(new[i]) if i<len(new) else None}
+          for i in range(max(0,center-2),min(count,center+3))]
+    allowed=(type(reason) is str and len(reason)<=160 and
+             (reason in {'the audio duration is invalid','the word coverage changed',
+                         'the CTC alignment confidence is broadly too low'} or
+              re.fullmatch(r'(?:the text changed|the timing is missing or nonfinite|the timing is empty or outside the recording|the timing moves backward|a word was stretched over more than 12 seconds|CTC confidence is missing or invalid) at word [1-9][0-9]*',reason)))
+    scores=[number(w.get('score')) for w in new[:10000] if type(w) is dict]
+    scores=[score for score in scores if score is not None and 0<=score<=1]
+    return {'version':'alignment-rejection-diagnostic-1','reason':reason if allowed else 'alignment rejected',
+            'word_index':index,'word_number':index+1 if index is not None else None,
+            'duration':number(duration),'original_word_count':len(old),'aligned_word_count':len(new),
+            'context_kind':'neighbours' if index is not None else 'opening-sample-global-failure',
+            'words':rows,'ctc_scores':{'valid_score_count':len(scores),
+                'mean':sum(scores)/len(scores) if scores else None,'below_0_10':sum(score<.10 for score in scores),
+                'sampled_word_count':min(len(new),10000),'sample_truncated':len(new)>10000},'backend':'unknown'}
+
+
+def validate_alignment(words, aligned, duration):
+    """Validate CTC evidence before replacing any recognizer word timing.
+
+    This checks plausibility, not whether the recognized words were sung. A
+    long instrumental pause between words is allowed. Words up to 12 seconds
+    are allowed here (the stricter publication checks still hold words over
+    eight seconds for review). Broadly weak CTC confidence must not borrow the
+    recognizer's separate confidence to appear successful.
+    """
+    def reject(reason,index=None):
+        error=AlignmentRejected('Audio realignment was rejected: '+reason+
+                                '. Check the words against the recording or align a known lyric sheet. '
+                                'No replacement lyrics were saved.')
+        try:error.diagnostic=alignment_rejection_diagnostic(words,aligned,duration,reason,index)
+        except Exception:
+            error.diagnostic={'version':'alignment-rejection-diagnostic-1','status':'unavailable','backend':'unknown'}
+        raise error
+
+    def finite(value):
+        if not isinstance(value,(int,float)) or isinstance(value,bool):return False
+        try:return math.isfinite(value)
+        except (OverflowError,ValueError):return False
+
+    if not finite(duration) or duration<=0:
+        reject('the audio duration is invalid')
+    if not isinstance(words,(list,tuple)) or not isinstance(aligned,(list,tuple)) or not words or len(aligned)!=len(words):
+        reject('the word coverage changed')
+    previous_end=0
+    scores=[]
+    for index,(old,new) in enumerate(zip(words,aligned)):
+        label='word '+str(index+1)
+        if not isinstance(old,dict) or not isinstance(new,dict) or new.get('text')!=old.get('text'):
+            reject('the text changed at '+label,index)
+        start,end=new.get('start'),new.get('end')
+        if not finite(start) or not finite(end):
+            reject('the timing is missing or nonfinite at '+label,index)
+        if start<0 or end>duration or end<=start:
+            reject('the timing is empty or outside the recording at '+label,index)
+        if start<previous_end-.05:
+            reject('the timing moves backward at '+label,index)
+        if end-start>12:
+            reject('a word was stretched over more than 12 seconds at '+label,index)
+        score=new.get('score')
+        if not finite(score) or not 0<=score<=1:
+            reject('CTC confidence is missing or invalid at '+label,index)
+        scores.append(score)
+        previous_end=end
+    if sum(scores)/len(scores)<.15 or sum(score<.10 for score in scores)>len(scores)/2:
+        reject('the CTC alignment confidence is broadly too low')
+
+
 def realign(audio,sr,words,work,progress,return_backend=False):
     import soundfile as sf
     source=work/'align-audio.wav';target=work/'aligned-words.json'
@@ -103,30 +262,76 @@ def realign(audio,sr,words,work,progress,return_backend=False):
     if enabled():
         try:
             helper('align',source,target,work,progress);aligned=json.loads(target.read_text());backend='radeon-rocm'
+        except GpuCapacityDeferred:
+            raise
         except Exception as error:print('GPU alignment fallback:',type(error).__name__,str(error)[-500:],flush=True)
     if aligned is None:
+        progress('aligning',0,'Loading the CPU word-alignment model and matching recognized words to this recording.')
         from lyrics_pipeline import align_reference
         aligned=align_reference(audio,sr,[' '.join(w['text'] for w in words)],progress)
-    if len(aligned)!=len(words):raise ValueError('Alignment text coverage changed')
+    try:validate_alignment(words,aligned,len(audio)/sr)
+    except AlignmentRejected as error:
+        detail=getattr(error,'diagnostic',None)
+        if isinstance(detail,dict):detail['backend']=backend
+        raise
     result=[]
     for old,new in zip(words,aligned):
-        if old['text']!=new['text']:raise ValueError('Alignment text changed')
-        result.append({**old,'start':new['start'],'end':new['end'],'alignment_score':new.get('score',0)})
+        result.append({**old,'start':new['start'],'end':new['end'],'alignment_score':new['score']})
     return (result,backend) if return_backend else result
 
-def recognize_windows(audio,sr,windows,work,progress):
+def recognize_windows(audio,sr,windows,work,progress,evidence=None,independent=False):
     import soundfile as sf
+    try:
+        from . import lyrics_cache as cache
+        from .lyrics_identity import recognizer_identity
+    except ImportError:
+        import lyrics_cache as cache
+        from lyrics_identity import recognizer_identity
     if not VULKAN or not VULKAN.is_file() or not GGML or not GGML.is_file():raise RuntimeError('Configure the Vulkan recognizer and model paths before using GPU recognition.')
     result={}
+    policy=recognition_policy('large-v3',independent=independent)
+    if evidence is not None:evidence.update(backend='whisper.cpp',engine='large-v3',settings=policy,windows=[])
     for index,(key,start,end) in enumerate(windows):
         clip=work/f'vulkan-{index}.wav';output=work/f'vulkan-{index}'
         sf.write(clip,audio[round(start*sr):round(end*sr)],sr,subtype='PCM_16')
-        args=[str(VULKAN),'-m',str(GGML),'-f',str(clip),'-t','4','-bs','3','-bo','3','-l','en','-mc','0','-ojf','-of',str(output),'-ml','1','-sow','-dtw','large.v3','-nfa']
+        args=[str(VULKAN),'-m',str(GGML),'-f',str(clip),'-t','4','-bs','3','-bo','3','-l',policy['language'],'-mc','0','-ojf','-of',str(output),'-ml','1','-sow','-dtw','large.v3','-nfa']
+        if policy['prompt']:args+=['--prompt',policy['prompt']]
         try:
-            p=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=max(120,min(900,int((end-start)*2+60))))
-            if p.returncode:raise RuntimeError('Vulkan recognition failed: '+p.stderr.decode(errors='replace')[-350:])
-            result[key]=parse_words(json.loads(output.with_suffix('.json').read_text()),start)
+            cache_path=None;context=None;raw=None;identity=None
+            fresh=os.environ.get('GNB_LYRICS_FRESH_RECOGNITION')=='1'
+            if os.environ.get('GNB_LYRICS_CACHE_DIR'):
+                try:
+                    identity=recognizer_identity(GGML,VULKAN)
+                    context={'schema':'vulkan-decoder-1','recognizer':identity,'policy':policy,
+                             'duration':end-start,'start':start,'end':end,'sample_rate':sr,
+                             'decoder':{'threads':4,'beam':3,'best_of':3,'max_context':0,
+                                        'word_timestamps':True,'dtw':'large.v3','flash_attention':False}}
+                    with clip.open('rb') as stream:pcm_sha=hashlib.file_digest(stream,'sha256').hexdigest()
+                    cache_path=cache.primary_path(pcm_sha,context,policy,start,end)
+                    if not fresh:raw=cache.read_primary(cache_path,context)
+                except Exception as error:
+                    cache_path=None;context=None;identity=None
+                    if evidence is not None:evidence['cache_disabled_reason']='Identity/cache unavailable ('+type(error).__name__+').'
+            cached=raw is not None
+            if cached:
+                progress('reviewing' if independent else 'transcribing',(index+1)/len(windows),
+                         'Reusing matching recognition evidence; timing and review checks still apply.')
+            else:
+                phase='reviewing' if independent else 'transcribing'
+                with gpu_phase(progress,phase):
+                    progress(phase,index/len(windows),'Recognizing sung words with GPU Whisper large-v3 (Vulkan).')
+                    p=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=max(120,min(900,int((end-start)*2+60))))
+                if p.returncode:raise RuntimeError('Vulkan recognition failed: '+p.stderr.decode(errors='replace')[-350:])
+                raw=json.loads(output.with_suffix('.json').read_text())
+                if identity is not None:
+                    if recognizer_identity(GGML,VULKAN)!=identity:
+                        raise RuntimeError('Recognizer model/runtime changed during recognition; cached evidence was not saved.')
+                    cache.write_primary(cache_path,raw,context)
+            result[key]=parse_words(raw,start)
+            if evidence is not None:
+                evidence['windows'].append({'key':key,'start':start,'end':end,'raw':deepcopy(raw),'cached':cached})
+                evidence['language']=(raw.get('result') or {}).get('language',policy['language'])
         finally:
             clip.unlink(missing_ok=True);output.with_suffix('.json').unlink(missing_ok=True)
-        progress('reviewing' if len(windows)>1 else 'transcribing',(index+1)/len(windows),'Recognizing sung words with Radeon-accelerated Whisper large-v3.')
+        progress('reviewing' if independent else 'transcribing',(index+1)/len(windows),'Recognizing sung words with Radeon-accelerated Whisper large-v3.')
     return result

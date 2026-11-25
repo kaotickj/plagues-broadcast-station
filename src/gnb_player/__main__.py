@@ -4,6 +4,10 @@ import sys
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ['--version']:
+        from . import __version__
+        print("Plague's Broadcast Station " + __version__)
+        return 0
     if arguments and arguments[0] == '--model-install-worker':
         from .model_install_worker import main as worker_main
         return worker_main(arguments[1:])

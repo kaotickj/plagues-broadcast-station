@@ -5,7 +5,7 @@ from .library import Track
 
 MAX_PROFILE_BYTES = 8 * 1024 * 1024
 
-def atomic_json(path: Path, data: dict) -> None:
+def _atomic_json(path: Path, data: dict) -> None:
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.station-', dir=path.parent)
     try:
@@ -15,6 +15,12 @@ def atomic_json(path: Path, data: dict) -> None:
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
+
+def atomic_json(path: Path, data: dict) -> None:
+    if Path(path).name in {'settings.json','session.json','broadcast-settings.json','lyrics-review-runtime.json'}:
+        from .studio_settings import studio_lock
+        with studio_lock(Path(path).parent):_atomic_json(path,data)
+    else:_atomic_json(path,data)
 
 def resolve_path(value: str, base: Path) -> Path:
     if not isinstance(value, str) or '\x00' in value: raise ValueError('Invalid media path in playlist.')
@@ -76,3 +82,70 @@ def save_m3u(path: Path, tracks: list[Track]) -> None:
         title = track.title.replace('\n', ' ').replace('\r', ' ')
         lines.extend([f'#EXTINF:{int(track.duration)},{title}', str(track.path)])
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def _save_model_preferences_locked(path, baseline, desired):
+    """Commit changed model fields only; never replace another instance's edits."""
+    from PySide6.QtCore import QLockFile
+    path = Path(path)
+    lock = QLockFile(str(path) + '.model-settings.lock')
+    if not lock.tryLock(1000):
+        raise OSError('Model settings are being saved by another instance. Try again.')
+    try:
+        try:
+            settings = json.loads(path.read_text())
+        except FileNotFoundError:
+            settings = {}
+        if not isinstance(settings, dict) or not isinstance(settings.get('extraction', {}), dict):
+            raise ValueError('Existing model settings are invalid; repair them before saving.')
+        latest = settings.get('extraction', {}).copy()
+        changes = {key: value for key, value in desired.items()
+                   if key not in baseline or value != baseline[key]}
+        missing = object()
+        conflicts = [key for key, value in changes.items()
+                     if latest.get(key, missing) != baseline.get(key, missing)
+                     and latest.get(key, missing) != value]
+        if conflicts:
+            raise ValueError('Model settings changed in another instance; reload before saving: ' + ', '.join(conflicts))
+        latest.update(changes)
+        from .extraction import ExtractionConfig
+        ExtractionConfig.from_dict(latest)
+        settings['extraction'] = latest
+        atomic_json(path, settings)
+        return latest
+    finally:
+        lock.unlock()
+
+
+MODEL_BACKUP_KIND = 'plagues-broadcast-station-model-settings'
+
+def export_model_preferences(path, values):
+    """Export only validated model fields, never stream profiles or credentials."""
+    from .extraction import ExtractionConfig
+    config = ExtractionConfig.from_dict(values)
+    atomic_json(Path(path), {'kind': MODEL_BACKUP_KIND, 'version': 1,
+                             'extraction': config.to_dict()})
+
+
+def import_model_preferences(path):
+    """Read and validate a backup without touching live preferences."""
+    from .extraction import ExtractionConfig
+    with Path(path).open('rb') as handle:
+        raw = handle.read(131073)
+    if len(raw) > 131072:
+        raise ValueError('Model settings backup is too large.')
+    data = json.loads(raw)
+    if (not isinstance(data, dict) or set(data) != {'kind', 'version', 'extraction'}
+            or data.get('kind') != MODEL_BACKUP_KIND or type(data.get('version')) is not int
+            or data['version'] != 1):
+        raise ValueError('Choose a version 1 Broadcast Station model settings backup.')
+    values = data['extraction']
+    if not isinstance(values, dict) or set(values) != set(ExtractionConfig.__dataclass_fields__):
+        raise ValueError('The backup has missing or unknown model settings.')
+    return ExtractionConfig.from_dict(values)
+
+
+def save_model_preferences(path, baseline, desired):
+    from .studio_settings import studio_lock
+    with studio_lock(Path(path).parent):
+        return _save_model_preferences_locked(path, baseline, desired)

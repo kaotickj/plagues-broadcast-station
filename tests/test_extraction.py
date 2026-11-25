@@ -29,7 +29,7 @@ class ExtractionTests(unittest.TestCase):
                 self.assertEqual(config.gpu_lock, "")
                 self.assertEqual(config.gpu_python_path, "")
                 self.assertEqual(config.vulkan_binary, "")
-                self.assertFalse(config.use_gpu)
+                self.assertTrue(config.use_gpu)
             values = {"GNB_PLAYER_PYTHON": str(base / "runtime/python"),
                       "GNB_PLAYER_MODELS": str(base / "configured-models"),
                       "GNB_PLAYER_TORCH_HOME": str(base / "configured-torch"),
@@ -164,7 +164,7 @@ class ExtractionTests(unittest.TestCase):
             def changed(*args,**kwargs):
                 source.write_bytes(b"a replaced recording")
                 return {"duration":60,"segments":[]}
-            modules = {"lyrics_acceleration":SimpleNamespace(reservation=reservation),
+            modules = {"lyrics_acceleration":SimpleNamespace(reservation=reservation,reset_gpu_timings=lambda:None,gpu_timings=lambda:[]),
                        "lyrics_pipeline":SimpleNamespace(extract=changed),
                        "lyrics_review":SimpleNamespace(review=lambda *a,**kw:a[2]),
                        "lyrics_quality":SimpleNamespace(assess=lambda data:{"status":"pass"})}

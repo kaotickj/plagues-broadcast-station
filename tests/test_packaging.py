@@ -26,8 +26,8 @@ class PackagingTests(unittest.TestCase):
     def test_external_worker_sources_are_data_files_without_model_weights(self):
         spec=self.read_spec();data=spec['datas']
         names={Path(source).name for source,destination in data}
-        for name in ['extract_worker.py','extraction.py','model_install.py','model_install_worker.py','model_discovery.py',
-                     'lyrics_pipeline.py','lyrics_acceleration.py','lyrics_gpu_helper.py','lyrics_review.py','lyrics_quality.py']:
+        for name in ['extract_worker.py','extraction.py','lyrics.py','lyric_timing.py','recognition_drafts.py','model_install.py','model_install_worker.py','model_discovery.py','review_device.py','review_partial.py',
+                     'lyrics_pipeline.py','lyrics_acceleration.py','lyrics_gpu_helper.py','lyrics_review.py','lyrics_quality.py','lyrics_identity.py','lyrics_cache.py','lyrics_model_io.py','lyrics_prealignment.py']:
             self.assertIn(name,names)
         self.assertTrue(all(Path(source).exists() for source,destination in data))
         self.assertFalse(any(any(part in source for part in ['media-packs','/private/','/models/']) for source,destination in data))
@@ -53,6 +53,18 @@ class PackagingTests(unittest.TestCase):
         with patch.dict(sys.modules,{'gnb_player.model_install_worker':worker,'gnb_player.app':None}):
             self.assertEqual(main(['--model-install-worker','--result-file','result.json']),74)
         self.assertEqual(received,[['--result-file','result.json']])
+
+    def test_external_worker_import_does_not_write_into_immutable_bundle(self):
+        with tempfile.TemporaryDirectory(prefix='isolated worker bundle ') as folder:
+            bundle=Path(folder)
+            for name in ['extract_worker.py','extraction.py','lyrics.py','lyric_timing.py','model_discovery.py','review_partial.py']:
+                shutil.copy2(ROOT/'src/gnb_player'/name,bundle/name)
+            # Match the actual external-worker entry path: execute the script,
+            # rather than importing the entry module (which Python compiles
+            # before its own code can set dont_write_bytecode).
+            subprocess.run([sys.executable,str(bundle/'extract_worker.py'),'--help'],check=True,capture_output=True,text=True,timeout=15)
+            self.assertFalse(list(bundle.rglob('*.pyc')))
+            self.assertFalse(list(bundle.rglob('__pycache__')))
 
     def test_source_installer_rejects_downloads_without_explicit_install_action(self):
         import json

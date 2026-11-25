@@ -229,7 +229,8 @@ def test_new_runtime_installs_only_into_isolated_venv_with_cpu_pins(tmp_path):
     constraints=Path(pip_commands[1][pip_commands[1].index('--constraint')+1]).read_text()
     assert 'torch==2.8.0' in constraints and 'torchaudio==2.8.0' in constraints
     assert calls[-1][-1]=='--allow-downloads'
-    assert result['use_gpu'] is False
+    # CPU dependencies do not select the separate Vulkan/ROCm acceleration policy.
+    assert 'use_gpu' not in result
 
 
 def test_postflight_rejects_smaller_or_wrong_language_whisper_models():
