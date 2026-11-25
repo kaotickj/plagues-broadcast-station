@@ -149,7 +149,11 @@ def type_path(window, field, value):
 def test_shared_resolution_is_visible_without_populating_component_overrides(station, layout):
     window = station()
     for field, path in layout.paths.items():
-        assert window.model_fields[field].text() == str(path)
+        if field == 'gpu_lock':
+            assert window.model_fields[field].text() == ''
+            assert window._model_resolution_report['fields'][field]['source'] == 'disabled'
+        else:
+            assert window.model_fields[field].text() == str(path)
     effective = extraction.effective_model_paths(window.extract_config)
     for component, field in COMPONENT_FIELDS.items():
         entry = window.model_fields[field]
@@ -279,7 +283,7 @@ def test_custom_runtime_command_on_path_has_no_false_missing_file_diagnostic(sta
 
 def test_station_settings_and_cache_are_isolated(station, layout, tmp_path):
     first, second = station('first'), station('second')
-    second.save_session()
+    assert second.save_model_settings() and second.save_session()
     second_before = second.settings_file.read_bytes()
     custom = layout.file(tmp_path/'first-only-python', executable=True)
     type_path(first, 'python_path', custom)

@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = ["PySide6>=6.8,<7", "numpy>=1.26,<3", "keyring>=25.7,<26"]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10"]
+test = ["pytest>=8,<10", "soundfile>=0.12,<1"]
 # The Linux credential bundle explicitly collects metadata for these packages.
 # Distribution-supplied cryptography may not declare its native dependencies.
 build = [

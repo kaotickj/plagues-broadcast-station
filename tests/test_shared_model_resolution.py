@@ -95,9 +95,14 @@ def test_missing_custom_roots_and_overrides_are_not_replaced_by_shared(locations
         review_model_path=str(base/'intentional-review'),gpu_python_path=str(base/'intentional-gpu'),
         vulkan_binary=str(base/'intentional-vulkan'),vulkan_model=str(base/'intentional-ggml'),gpu_lock=str(base/'intentional-lock'))
     resolved,report=models.resolve_existing_models(config)
-    for field in ('python_path','model_root','torch_home','review_model_path','gpu_python_path','vulkan_binary','vulkan_model','gpu_lock'):
+    for field in ('python_path','model_root','torch_home','review_model_path','gpu_python_path','vulkan_binary','vulkan_model'):
         assert getattr(resolved,field)==getattr(config,field)
         assert report['fields'][field]['missing_files']
+    # The merged dev13 configuration intentionally retires shared GPU locks.
+    assert config.gpu_lock==str(base/'intentional-lock')
+    assert resolved.gpu_lock==''
+    assert report['fields']['gpu_lock']['source']=='disabled'
+    assert report['fields']['gpu_lock']['configured']==config.gpu_lock
     assert report['effective_model_paths']['transcription']==str(Path(config.model_root)/config.engine)
     assert report['effective_model_paths']['alignment']==str(Path(config.torch_home)/models._ALIGNMENT_CHECKPOINT)
 
@@ -204,13 +209,14 @@ def test_inaccessible_custom_paths_remain_visible_without_crashing(locations,mon
     assert not models.config_status(config)['ready']
 
 
-def test_existing_shared_lock_is_not_omitted_when_access_is_unavailable(locations,monkeypatch):
+def test_retired_shared_lock_does_not_gate_generation_when_access_is_unavailable(locations,monkeypatch):
     _,shared=locations;install_shared(shared);real_access=os.access
     def denied(path,mode):return False if Path(path)==shared['gpu_lock'] else real_access(path,mode)
     monkeypatch.setattr(models.os,'access',denied)
     resolved,report=models.resolve_existing_models(models.discover_config())
-    assert resolved.gpu_lock==str(shared['gpu_lock'])
-    assert report['fields']['gpu_lock']['missing_files']==[str(shared['gpu_lock'])]
+    assert resolved.gpu_lock==''
+    assert report['fields']['gpu_lock']['source']=='disabled'
+    assert report['fields']['gpu_lock']['missing_files']==[]
 
 
 @pytest.mark.parametrize('markers',['python_path',['unknown'],[True],['python_path']*12])

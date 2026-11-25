@@ -302,7 +302,7 @@ def test_credential_bearing_url_is_not_written_to_ordinary_state_or_exports(oper
     window.save_stream_profile()
     assert 'Not saved' in window.stream_profile_status.text()
     assert not window.credential_store.settings_file.exists() and backend.calls == []
-    assert window.save_session()
+    assert window.save_model_settings() and window.save_session()
     exported = tmp_path / 'portable playlist.json'
     write_profile(exported, window.all_tracks, window.backgrounds, window.lyric_files,
                   window.visual_settings(), window.profile_name)
