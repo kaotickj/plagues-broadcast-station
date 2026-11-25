@@ -29,8 +29,13 @@ def test_cache_choice_persists_and_is_explicitly_applied_to_next_job(window,tmp_
         assert other.extract_config.reuse_recognition is True
     finally:restored.close();other.close();app.processEvents()
     track=add_fixture_tracks(window,tmp_path,1)[0];window.playlist.setCurrentRow(0)
-    monkeypatch.setattr(window,'_next_extraction',lambda:None)
+    # The operator action now enters a modal assisted review, not the legacy
+    # queue. Test routing without opening a real dialog or starting a model.
+    review_calls=[]
+    monkeypatch.setattr(window,'open_assisted_review',lambda **kwargs:review_calls.append(kwargs))
     window.queue_extraction()
+    assert review_calls==[{'supplied_text':None,'prepare':True}]
+    # The legacy extraction config still owns this cache preference.
     args=build_command(track.path,tmp_path/'not-executed.json',window.extract_config)
     config=ExtractionConfig.from_dict(json.loads(args[args.index('--config-json')+1]))
     assert config.reuse_recognition is enabled
