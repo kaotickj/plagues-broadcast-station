@@ -363,6 +363,32 @@ def test_saved_stage_e_partial_timing_reaches_review_controller_without_word_los
     assert calls == ['qwen-align'] and not candidate['reviewed']
     assert candidate['provenance']['alignment_evidence']['review_text_complete']
     assert candidate['provenance']['unplaced'] == mapped['unplaced']
-    assert candidate['segments'] == segments
+    # The controller upgrades legacy partial cues to explicit native-token
+    # support. Independently construct the expected display map; every other
+    # field (including original measurements, words and text) must stay exact.
+    from copy import deepcopy
+    expected = deepcopy(segments)
+    partial_count = 0
+    for row in expected:
+        if row.get('timing_kind') != 'partial_native_support_requires_review':
+            continue
+        partial_count += 1
+        assert row.pop('highlight_allowed') is False
+        assert row.pop('highlight_intervals') == []
+        row['partial_original_highlight_policy'] = {'highlight_allowed': False, 'highlight_intervals': []}
+        indices = row['source_token_indices']
+        labels = row['text'].split()
+        assert len(indices) == len(labels)
+        word_indices = {word['token_index']: i for i, word in enumerate(row['words'])}
+        assert len(word_indices) == len(row['words'])
+        tokens = [{'text': label, 'token_index': index, 'word_index': word_indices.get(index)}
+                  for label, index in zip(labels, indices)]
+        assert any(token['word_index'] is None for token in tokens)
+        missing = {token['token_index'] for token in tokens if token['word_index'] is None}
+        assert missing == {issue['token_index'] for issue in row['native_timing_issues']}
+        row['timing_kind'] = 'partial_native_word_support'
+        row['partial_timing'] = {'version': 'native-partial-tokens-1', 'region': row['region'], 'tokens': tokens}
+    assert partial_count > 0
+    assert candidate['segments'] == expected
     print(variant, 'tokens', len(reference.split()), 'positive', len(mapped['words']),
           'unresolved', len(mapped['unplaced']), 'cues', len(segments), 'controller candidate unreviewed')
