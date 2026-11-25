@@ -13,6 +13,7 @@ from .review_core import (ReviewStore,ReviewConfig,embedded_lyrics,mark_unreview
                           set_phrase_bounds,review_markers,now,alignment_input,verify_job_revision,
                           hold_saved_repetition,exclude_held_passage,review_provenance_label,recover_word_highlights)
 from .review_partial import partial_tokens
+from .review_sheet import bracket_only_text, embedded_instrumental_candidate
 from .lyric_review import document_revision, is_approved
 from .review_timing import edit_bounds, offset as timing_offset, reset_timing
 from .review_vocabulary import stage_suggestions, decide_suggestion
@@ -48,6 +49,8 @@ class LyricsReviewDialog(QDialog):
             self.embedded=embedded_lyrics(track.path)
             atomic_json(self.store.root/'embedded-source.json',self.embedded)
             self.source_label.setText('Embedded lyrics found — unverified; original tags preserved.' if self.embedded['text'] else 'No embedded lyrics. Extract & align runs automatically; supplying words is optional.')
+            if embedded_instrumental_candidate(self.embedded):
+                self.source_label.setText('Possible instrumental: embedded lyric fields contain only bracketed text. Listen and confirm the instrumental designation, or explicitly choose audio transcription. Original tags preserved.')
             self.reference.setPlainText(self.embedded['text'])
         except Exception as e:
             self.source_label.setText('Tag check failed: '+str(e));self.embedded={'kind':'probe_failed','text':'','trusted':False,'error':str(e)}
@@ -190,6 +193,10 @@ class LyricsReviewDialog(QDialog):
         if self.busy:return
         if self.instrumental.isChecked():
             self.status.setText('Known instrumental: generation skipped. Existing designation retained.');return
+        if embedded_instrumental_candidate(self.embedded) and not self.ignore_tags.isChecked():
+            self.preparation.show();self.prepare_button.setText('Hide preparation')
+            self.status.setText('Possible instrumental: model generation paused. Listen and confirm instrumental, or check the embedded-source transcription override and click Extract & align again.')
+            return
         if self.document.segments or self.document.metadata.get('recognition_regions'):
             answer=QMessageBox.question(self,'Create a new timed candidate?',
                 'Extract and align this recording again? The previous draft stays in history; approved output is unchanged.',
@@ -505,6 +512,10 @@ class LyricsReviewDialog(QDialog):
         if value:
             self.document.metadata.setdefault('before_instrumental',self.document.to_dict())
             self.document.segments=[];self.document.metadata['instrumental']=True
+            # The original sheet is kept in before_instrumental, not presented
+            # as an active untimed lyric sheet on an instrumental recording.
+            for key in ('timing_mode','untimed_lyrics','supplied_sheet'):
+                self.document.metadata.pop(key,None)
         else:
             saved=self.document.metadata.pop('before_instrumental',None)
             if saved:self.document=LyricsDocument.from_dict(saved)
@@ -579,7 +590,9 @@ class LyricsReviewDialog(QDialog):
         if self.busy or self.instrumental.isChecked():return
         try:
             self.store.verify()
-            if mode=='extract' and (self.embedded.get('text') or self.embedded.get('kind')=='probe_failed') and not self.ignore_tags.isChecked():raise ValueError('Check the embedded source first. Align supplied text, or explicitly choose audio transcription instead.')
+            if mode=='align' and source=='supplied' and bracket_only_text(self.reference.toPlainText()):
+                raise ValueError('Bracket-only text may be performance directions. Use Lyrics sheet to explicitly keep any genuinely sung words, or confirm instrumental.')
+            if mode=='extract' and (self.embedded.get('text') or embedded_instrumental_candidate(self.embedded) or self.embedded.get('kind')=='probe_failed') and not self.ignore_tags.isChecked():raise ValueError('Check the embedded source first. Align supplied text, or explicitly choose audio transcription instead.')
             if mode=='extract' and (self.document.segments or self.document.metadata.get('recognition_regions')) and not self.replace_timing.isChecked():raise ValueError('Extraction replaces the whole candidate and its timing. Confirm replacement first; previous draft will be retained.')
             if source!='sheet':self.commit_text_section()
             self.config.review_device=self.review_device_select.currentData();self.config.review_gpu_python=self.review_gpu_python.text().strip()

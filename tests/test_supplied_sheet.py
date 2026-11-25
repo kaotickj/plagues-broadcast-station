@@ -3,7 +3,7 @@ import json
 import pytest
 from test_qwen_review_flow import source, dialog
 from test_qwen_automatic_ui import stage, feed
-from gnb_player.review_sheet import bracket_preview, make_sheet, SheetStore, alignment_plan
+from gnb_player.review_sheet import bracket_preview, make_sheet, SheetStore, alignment_plan, embedded_instrumental_candidate
 from gnb_player.supplied_text_contract import prepared_text
 from gnb_player.lyrics import LyricsDocument, Cue, Word
 from gnb_player.review_core import ReviewStore
@@ -24,6 +24,25 @@ def test_direction_preview_retains_repeats_lines_ambiguous_words_and_original():
     assert SHEET.startswith('[Intro')
     assert bracket_preview('A [unfinished')[0] == 'A [unfinished'
     assert bracket_preview('[unknown words]')[0] == 'unknown words'
+
+@pytest.mark.parametrize('text,expected', [
+    ('[Intro: piano]\n[tenor sax and slow brushed drums]\n[No vocals]',True),
+    ('[oh baby]',True),
+    ('[Intro]\nActual sung words',False),
+    ('[unclosed',False),
+    ('[]',False),
+    ('',False),
+])
+def test_bracket_only_is_candidate_not_proof(text,expected):
+    assert embedded_instrumental_candidate({'text':text}) is expected
+
+
+def test_conflicting_embedded_sources_are_not_instrumental_candidates():
+    assert not embedded_instrumental_candidate({
+        'text':'[Instrumental]',
+        'sources':[{'text':'[Instrumental]'},{'text':'Actual sung words'}]})
+    assert not embedded_instrumental_candidate({'kind':'probe_failed','text':'[Instrumental]'})
+
 
 def test_private_sheet_save_restart_history_no_draft_or_output_changes(dialog):
     d = dialog; doc = LyricsDocument([Cue('old', 1, 2, [Word('old', 1, 2)])], 300, source_sha256=d.store.digest)

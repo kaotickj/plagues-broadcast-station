@@ -174,6 +174,13 @@ class BroadcastStage(QWidget):
         self._check_publication()
         self.update()
 
+    def _is_instrumental(self):
+        # The existing publication guard validates the exact saved recording.
+        metadata = _get(self._lyrics, 'metadata', {})
+        return bool(isinstance(metadata, dict) and metadata.get('instrumental') is True
+                    and not _get(self._lyrics, 'segments', [])
+                    and metadata.get('timing_mode') != 'untimed')
+
     def _check_publication(self):
         if self._lyrics is not None:
             try:allowed=bool(self._publication_guard(self._lyrics))
@@ -431,7 +438,7 @@ class BroadcastStage(QWidget):
         veil.setColorAt(1, QColor(3, 10, 15, 232))
         p.fillRect(canvas, veil)
         self._draw_header(p)
-        if self._settings["lyrics"] and self._lyrics is not None:
+        if self._settings["lyrics"] and self._lyrics is not None and _get(self._lyrics, 'segments', []):
             self._draw_lyrics(p)
         elif not self._title:
             p.setPen(QColor("#e5c58f"))
@@ -538,8 +545,13 @@ class BroadcastStage(QWidget):
         p.setPen(QColor("#b5bcba"))
         p.setFont(_font(16))
         credit = " · ".join(item for item in [self._artist, self._album] if item)
-        p.drawText(QRectF(72, 582, 1120, 30), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   QFontMetricsF(p.font()).elidedText(credit, Qt.TextElideMode.ElideRight, 1120))
+        instrumental = self._is_instrumental()
+        credit_width = 890 if instrumental else 1120
+        p.drawText(QRectF(72, 582, credit_width, 30), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   QFontMetricsF(p.font()).elidedText(credit, Qt.TextElideMode.ElideRight, credit_width))
+        if instrumental:
+            p.setPen(QColor('#e4c385'))
+            p.drawText(QRectF(980, 582, 230, 30), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, '♪ Instrumental')
         if self._settings["waveform"]:
             self._draw_waveform(p, QRectF(300, 637, 680, 45))
         p.setPen(QPen(QColor(199, 168, 112, 88), 1))

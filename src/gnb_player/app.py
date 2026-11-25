@@ -21,7 +21,7 @@ from .playback import PlaybackEngine
 from .stage import BroadcastStage, IMAGE_SUFFIXES, VIDEO_SUFFIXES, DEFAULT_WAVEFORM_COLOR, waveform_color
 from .lyrics import load_lyrics, load_imported_lyrics, save_lyrics, find_lyrics, fingerprint, cached_lyrics_path, lyric_content_revision
 from .file_state import file_change_stamp
-from .lyric_review import document_revision, is_approved, edit_document, retarget_review, save_review_document
+from .lyric_review import document_revision, is_approved, is_instrumental, edit_document, retarget_review, save_review_document
 from .lyric_editor import TimedLyricsEditor, stored_review_notes, parse_seconds
 from .extraction import ExtractionConfig, discover_config, config_status, build_command, parse_worker_event, default_data_dir, resolve_existing_models, MODEL_PATH_FIELDS
 from .studio_settings import studio_lock, recover_import, read_json, snapshot_session, make_backup, export_studio, prepare_import, import_studio
@@ -598,7 +598,7 @@ class MainWindow(QMainWindow):
         return self._matches_recording(track,document)
     def _program_publication_valid(self,document):
         track=self.engine.current_track
-        return bool(track and document.segments and self._document_ready(track,document))
+        return bool(track and document and (document.segments or (is_instrumental(document) and not document.untimed_text)) and self._document_ready(track,document))
     def _update_program_lyrics(self,track,document):
         if self.engine.current_track and self.engine.current_track.path==track.path:
             safe=self._document_ready(track,document)
@@ -617,6 +617,8 @@ class MainWindow(QMainWindow):
         if document:
             ready=self._document_ready(track,document)
             state='Lyrics ready · reviewed for this recording.' if ready else ('Lyrics need review before airing.' if document.segments else 'Saved empty draft · no lyrics approved.')
+            if is_instrumental(document) and not document.untimed_text:
+                state='Instrumental reviewed · no lyrics required.' if ready else 'Instrumental designation needs approval.'
             self.lyric_status.setText(track.title+' · '+state)
             if buffer:
                 if buffer['revision']!=self._editor_revision:buffer['conflict']=True

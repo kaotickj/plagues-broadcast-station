@@ -71,6 +71,10 @@ The Lyric models page checks existing shared Linux locations under `/var/lib/gnb
 
 In a source checkout, FFmpeg and ffprobe must be on PATH for extraction and metadata probing. Native packages include FFmpeg and ffprobe executables with their dependencies for recording/direct streaming. Source runs require those tools on PATH. Existing timed lyric imports work without the model environment.
 
+### Instrumental recordings
+
+Bracket-only embedded lyric fields are a possible instrumental signal, not proof of the absence of vocals. Automatic extraction pauses for these recordings. Listen in private review and use the existing instrumental checkbox, or explicitly choose audio transcription if vocals are present. The original tags remain unchanged; use Lyrics sheet to select genuinely sung bracketed words. Confirm and save the designation with the existing recording-bound approval. Confirmed, approved instrumentals remain eligible for the lyrics-ready playlist and display a small ♪ Instrumental credit in Program Output without the sing-along panel. Unknown tracks remain music-only and are not labelled instrumental. Revoking or changing a saved approval removes the indicator. No model is used when an instrumental is designated.
+
 ## Run from Python source
 
 Use Python 3.11 or newer; Python 3.12 is the CI build version.

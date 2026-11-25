@@ -31,6 +31,28 @@ def test_default_click_no_text_input_and_double_click_cannot_duplicate(dialog,mo
     d.set_busy(False)
 
 
+def test_bracket_only_embedded_metadata_holds_automatic_extraction(dialog,monkeypatch):
+    d=dialog;requests=stage(d,monkeypatch)
+    text='[Intro: saxophone]\n[Slow instrumental blues, no vocals]'
+    d.embedded={'kind':'embedded_unverified','text':text,'tags':{'lyrics':text}}
+    before=d.document.to_dict()
+    d.begin_automatic()
+    assert not requests and not d.store.output_target.exists()
+    assert d.document.to_dict()==before and not d.instrumental.isChecked()
+    assert 'Possible instrumental' in d.status.text()
+    d.reference.setPlainText(text)
+    d.start_job('align',source='supplied')
+    assert not requests and 'Bracket-only' in d.status.text()
+    d.instrumental.setChecked(True)
+    d.begin_automatic()
+    assert not requests and d.document.metadata['instrumental'] is True
+    d.instrumental.setChecked(False)
+    d.ignore_tags.setChecked(True)
+    d.begin_automatic()
+    assert len(requests)==1 and requests[0]['reference_text']==''
+    d.set_busy(False)
+
+
 def test_main_action_starts_automatic_job_after_dialog_opens(monkeypatch):
     import gnb_player.app as appmodule
     import gnb_player.review_dialog as review

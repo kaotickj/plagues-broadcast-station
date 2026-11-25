@@ -78,6 +78,31 @@ def embedded_sources(embedded):
     return [{'label':'Embedded lyrics','text':embedded['text'],'location':'embedded text'}] if embedded.get('text') else []
 
 
+def bracket_only_text(text):
+    """Candidate evidence only: every non-whitespace character is bracketed.
+
+    Free-form Suno instructions may not match our editorial vocabulary.
+    Bracketed sung words are also possible, so this never proves an
+    instrumental or removes words from a lyric sheet.
+    """
+    if not isinstance(text, str) or not text.strip() or len(text) > LIMIT:
+        return False
+    matches = list(BRACKET.finditer(text))
+    return bool(matches and all(m.group(1).strip() for m in matches)
+                and not BRACKET.sub('', text).strip())
+
+
+def embedded_instrumental_candidate(embedded):
+    """All nonempty embedded lyric sources must be bracket-only; no approval."""
+    if embedded.get('kind') == 'probe_failed':
+        return False
+    values = [row.get('text') for row in embedded_sources(embedded)]
+    # Include the aggregate and tag values as a conservative check for conflicts.
+    values.extend([embedded.get('text', ''), *embedded.get('tags', {}).values()])
+    values = [value for value in values if isinstance(value, str) and value.strip()]
+    return bool(values and all(bracket_only_text(value) for value in values))
+
+
 def import_text_file(path):
     path=Path(path)
     with path.open('rb') as f:raw=f.read(512*1024+1)
