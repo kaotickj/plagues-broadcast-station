@@ -359,6 +359,8 @@ try:
  with store.transaction(): raise AssertionError('interleaving permitted')
 except ProfileError as error:
  assert 'progress' in str(error)
+except OSError as error:
+ assert 'Studio settings are busy' in str(error)
 '''
     with saved.transaction():
         result = subprocess.run([sys.executable, '-c', child_code, str(saved.data_dir)], capture_output=True, text=True,
@@ -372,7 +374,9 @@ def test_windows_outer_transaction_and_individual_operation_use_distinct_locks(s
     fake = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2,
                            locking=lambda fd, kind, length: calls.append((fd, kind, length)))
     monkeypatch.setitem(sys.modules, 'msvcrt', fake)
-    with patch('gnb_player.broadcast_profile.os.name', 'nt'):
+    # Mock only this module's platform branch, not the global os.name used
+    # by pathlib and the real outer studio-settings lock.
+    with patch('gnb_player.broadcast_profile.os', SimpleNamespace(name='nt', SEEK_END=os.SEEK_END)):
         with saved.transaction():
             with saved._lock():
                 pass

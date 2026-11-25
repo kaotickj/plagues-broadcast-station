@@ -6,7 +6,7 @@ import pytest
 
 from gnb_player import app as app_module
 from gnb_player import file_state
-from gnb_player.lyrics import Cue, LyricsDocument, fingerprint
+from gnb_player.lyrics import Cue, LyricsDocument, fingerprint, save_lyrics
 
 
 class FrozenMetadataPath:
@@ -24,7 +24,7 @@ def fixture_state(tmp_path):
     track=SimpleNamespace(path=FrozenMetadataPath(audio))
     document=LyricsDocument([Cue('Original lyric words',1,2)],3,source_sha256=fingerprint(audio))
     window=SimpleNamespace(_lyric_stamps={},lyric_files={},_lyric_locations={},
-        _lyric_file_stamps={},_source_checks={},documents={},_invalid_lyrics=set())
+        _lyric_file_stamps={},_source_checks={},documents={},_invalid_lyrics=set(),_publication_revisions={})
     return audio,track,document,window
 
 
@@ -138,7 +138,7 @@ def test_change_during_hash_cannot_enter_source_cache(tmp_path,monkeypatch):
 @pytest.mark.parametrize('available',[True,False])
 def test_lyric_file_rewrite_is_detected_without_windows_ctime(tmp_path,monkeypatch,available):
     _,track,document,window=fixture_state(tmp_path)
-    lyric=tmp_path/'lyrics.json';lyric.write_bytes(b'original lyric file')
+    lyric=tmp_path/'lyrics.json';save_lyrics(document,lyric)
     key=str(track.path);window.lyric_files[key]=str(lyric)
     tokens={str(track.path):100,str(lyric):200}
     before=lyric.stat()

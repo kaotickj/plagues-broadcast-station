@@ -29,7 +29,9 @@ def test_flagged_or_missing_lyrics_are_not_ready(window,tmp_path):
 def test_appearance_roundtrip_and_stream_key_never_saved(window,tmp_path):
     window.brand.setText('Night Station');window.interval.setValue(33);window.motion.setChecked(False);window.wave.setChecked(False)
     window.stream_key.setText('PRIVATE-KEY-TEST');window.destination.setText('rtmps://host.invalid/app/PRIVATE-KEY-TEST')
-    window.save_session();settings=(window.data_dir/'settings.json').read_text();session=(window.data_dir/'session.json').read_text()
+    # Model settings and station sessions are now saved independently.
+    assert window.save_model_settings() and window.save_session()
+    settings=(window.data_dir/'settings.json').read_text();session=(window.data_dir/'session.json').read_text()
     assert 'PRIVATE-KEY-TEST' not in settings+session
     window.motion.setChecked(True);window.load_profile(window.data_dir/'session.json')
     assert window.interval.value()==33 and not window.motion.isChecked() and not window.wave.isChecked()
@@ -183,7 +185,9 @@ def test_async_result_keeps_replaced_recordings_off_air(window,tmp_path,lyric_ta
 
 def test_resume_restores_playing_transcript_without_reusing_changed_audio(window,tmp_path,lyric_tasks):
     track=add_fixture_tracks(window,tmp_path,1)[0];window.engine.order.select(0)
-    document=lyric_fixture(track);window._remember_document(track,document)
+    document=lyric_fixture(track);target=track.path.with_suffix('.lyrics.json')
+    save_lyrics(document,target);window.lyric_files[str(track.path)]=str(target)
+    window._remember_document(track,document)
     window._playing(True)
     assert window.stage._lyrics is document
     track.path.write_bytes(b'another fixture version')

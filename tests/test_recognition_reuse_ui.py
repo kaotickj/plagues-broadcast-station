@@ -1,6 +1,8 @@
 """Fresh/reuse choice is explicit, persistent, per station and worker-bound."""
 import json
 import os
+import sys
+from dataclasses import replace
 from unittest.mock import patch
 import pytest
 from PySide6.QtCore import Qt, QPoint
@@ -36,7 +38,11 @@ def test_cache_choice_persists_and_is_explicitly_applied_to_next_job(window,tmp_
     window.queue_extraction()
     assert review_calls==[{'supplied_text':None,'prepare':True}]
     # The legacy extraction config still owns this cache preference.
-    args=build_command(track.path,tmp_path/'not-executed.json',window.extract_config)
+    # This is a command serialization test, not a model-discovery test.
+    # Supply the running interpreter without executing the worker.
+    config=replace(window.extract_config,python_path=sys.executable,
+                   explicit_paths=sorted(set(window.extract_config.explicit_paths)|{'python_path'}))
+    args=build_command(track.path,tmp_path/'not-executed.json',config)
     config=ExtractionConfig.from_dict(json.loads(args[args.index('--config-json')+1]))
     assert config.reuse_recognition is enabled
     with patch.dict(os.environ,{},clear=True):
