@@ -232,6 +232,8 @@ def review_markers(document):
 
 def review_provenance_label(document):
     """Describe the current text source without turning provenance into approval."""
+    if document.metadata.get('instrumental') is True and not document.segments:
+        return 'Operator instrumental designation. Prior lyric evidence remains recoverable; no model-generated words are used.'
     provenance=document.metadata.get('provenance',{})
     mode=provenance.get('mode') if isinstance(provenance,dict) else None
     if mode=='supplied_untimed':return 'Words: supplied lyric sheet. Untimed — no alignment, synchronized highlighting or automatic accuracy claim.'

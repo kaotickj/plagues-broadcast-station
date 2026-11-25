@@ -3,7 +3,7 @@ import json,copy
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
-from test_qwen_review_flow import source,dialog
+from test_qwen_review_flow import source,dialog,untimed
 from gnb_player.lyrics import LyricsDocument,Cue,Word
 from gnb_player.review_core import ReviewConfig
 
@@ -51,6 +51,34 @@ def test_bracket_only_embedded_metadata_holds_automatic_extraction(dialog,monkey
     d.begin_automatic()
     assert len(requests)==1 and requests[0]['reference_text']==''
     d.set_busy(False)
+
+
+def test_designating_instrumental_preserves_and_retires_recognition_sections(dialog,source,monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from gnb_player.lyric_review import is_approved
+    from gnb_player.lyrics import load_lyrics
+    d=dialog;requests=stage(d,monkeypatch)
+    d.set_document(untimed(source))
+    d.reference.setPlainText('Corrected prior recognition')
+    d.instrumental.setChecked(True)
+    assert d.document.metadata['instrumental'] is True
+    assert not d.document.segments and not d.document.metadata.get('recognition_regions')
+    assert d.document.metadata['before_instrumental']['recognition_regions'][0]['text']=='Corrected prior recognition'
+    assert d.section_select.count()==0 and not d.reference.toPlainText()
+    assert d.save_draft()
+    d.restore_draft()
+    assert d.instrumental.isChecked() and not requests
+    monkeypatch.setattr(QMessageBox,'question',lambda *args:QMessageBox.StandardButton.Ok)
+    d.confirm.setChecked(True);d.approve()
+    published=load_lyrics(d.store.output_target)
+    assert is_approved(published) and published.metadata['instrumental'] is True
+    assert not published.segments and not requests
+    d.instrumental.setChecked(False)
+    assert not d.document.metadata.get('instrumental')
+    assert d.document.metadata['recognition_regions'][0]['text']=='Corrected prior recognition'
+    assert d.section_select.count()==2 and d.reference.toPlainText()=='Corrected prior recognition'
+    assert not is_approved(d.document)
+    assert load_lyrics(d.store.output_target).metadata['instrumental'] is True
 
 
 def test_main_action_starts_automatic_job_after_dialog_opens(monkeypatch):

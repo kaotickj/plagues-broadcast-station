@@ -114,8 +114,11 @@ def test_in_memory_edit_and_guard_exception_fail_closed(station,tmp_path,monkeyp
     w.stage.render_frame(640,360);assert w.stage._lyrics is None
 
 def test_approved_instrumental_is_valid_but_has_no_lyric_display(station,tmp_path):
-    w=station();tracks,targets=recordings(w,tmp_path)
+    w=station();tracks,targets=recordings(w,tmp_path,approved_second=True)
     doc=LyricsDocument([],10,tracks[0].title,fingerprint(tracks[0].path),metadata={'instrumental':True})
+    save_lyrics(doc,targets[0]);w._remember_document(tracks[0],doc)
+    select_program(w,tracks[0],0)
+    assert not w.stage._is_instrumental() and not w._has_lyrics(tracks[0])
     doc=approve_document(doc,doc.source_sha256);save_lyrics(doc,targets[0]);w._remember_document(tracks[0],doc)
     select_program(w,tracks[0],0)
     assert w._has_lyrics(tracks[0]) and w.stage._lyric_rows()==(None,'','')
@@ -125,7 +128,10 @@ def test_approved_instrumental_is_valid_but_has_no_lyric_display(station,tmp_pat
     plain_frame=w.stage.render_frame(1280,720)
     assert approved_frame.copy(0,0,1280,530)==plain_frame.copy(0,0,1280,530)
     assert approved_frame.copy(980,582,230,30)!=plain_frame.copy(980,582,230,30)
-    w._update_program_lyrics(tracks[0],doc)
+    select_program(w,tracks[1],1)
+    assert not w.stage._is_instrumental() and w.stage._lyric_rows()[0].text=='Lyric 1'
+    select_program(w,tracks[0],0)
+    assert w.stage._is_instrumental()
     targets[0].unlink();w.stage.render_frame(1280,720)
     assert not w.stage._is_instrumental() and w.stage._lyrics is None
     w._track_changed(tracks[1]);assert not w.stage._is_instrumental()

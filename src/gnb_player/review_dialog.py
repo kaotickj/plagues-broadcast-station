@@ -167,7 +167,7 @@ class LyricsReviewDialog(QDialog):
         if document.source_sha256 and document.source_sha256!=self.store.digest:raise ValueError('Candidate belongs to another recording.')
         self.document=document;self.document.source_sha256=self.store.digest
         self._section_index=-1;self.section_select.blockSignals(True);self.section_select.clear()
-        sections=document.metadata.get('recognition_regions',[]) if not document.segments else []
+        sections=document.metadata.get('recognition_regions',[]) if not document.segments and not document.metadata.get('instrumental') else []
         for i,s in enumerate(sections):self.section_select.addItem(f"Section {i+1} · {s['start']:.1f}–{s['end']:.1f} s",i)
         self.section_select.blockSignals(False);self.section_select.setVisible(bool(sections) and self.supplied_options.isChecked())
         if sections:self.select_text_section(0)
@@ -187,7 +187,7 @@ class LyricsReviewDialog(QDialog):
 
     def show_supplied_options(self,show):
         for widget in (self.reference,self.supplied_align_button,self.repeat_override):widget.setVisible(show)
-        self.section_select.setVisible(show and bool(self.document.metadata.get('recognition_regions')) and not self.document.segments)
+        self.section_select.setVisible(show and bool(self.document.metadata.get('recognition_regions')) and not self.document.segments and not self.document.metadata.get('instrumental'))
 
     def begin_automatic(self):
         if self.busy:return
@@ -265,6 +265,7 @@ class LyricsReviewDialog(QDialog):
             self.dirty=True;self.confirm.setChecked(False)
 
     def commit_text_section(self):
+        if self.document.metadata.get('instrumental') is True:return
         if self._section_index>=0 and not self.document.segments:
             changed=edit_section(self.document,self._section_index,self.reference.toPlainText())
             if changed.to_dict()!=self.document.to_dict():
@@ -291,7 +292,7 @@ class LyricsReviewDialog(QDialog):
         self.untimed_view.setPlainText(self.document.untimed_text);self.lyric_views.setCurrentIndex(1 if untimed else 0)
         self.edit_tabs.setVisible(not untimed);self.passage_actions.setVisible(not untimed)
         self.align_button.setText('Align this sheet (optional)' if untimed else ('Retry alignment' if self._section_index>=0 else 'Realign current draft'))
-        self.confirm.setText('Approve this untimed sheet for the library' if untimed else 'Approve this candidate for output')
+        self.confirm.setText('Approve this instrumental for output' if self.document.metadata.get('instrumental') else ('Approve this untimed sheet for the library' if untimed else 'Approve this candidate for output'))
         selected=self.selected_rows();row=self.table.currentRow();word=self.timing_target.currentData()
         self.table.blockSignals(True);self.table.setRowCount(len(self.document.segments))
         for i,cue in enumerate(self.document.segments):
@@ -321,6 +322,8 @@ class LyricsReviewDialog(QDialog):
         unresolved=sum(h.get('status')=='held' for h in held)
         self.status.setText(f'{status.upper()} · {len(self.document.segments)} phrases · {unresolved} held items. Advisory flags do not require line-by-line edits. Approve shows one summary of any untimed words.')
         if untimed:self.status.setText('Untimed lyric sheet · no timestamps or synchronized highlighting. Use Paste lyrics to edit. Alignment is optional; library approval is separate.')
+        if self.document.metadata.get('instrumental'):
+            self.status.setText('Instrumental designation · '+('approved for output.' if status=='approved' else 'approve explicitly for output; no models required.'))
         recoverable=any(w.metadata.get('native_timing_issues_before_automatic_grouping') for c in self.document.segments for w in c.words)
         self.recover_words_button.setVisible(recoverable)
         self.instrumental.blockSignals(True);self.instrumental.setChecked(bool(self.document.metadata.get('instrumental')));self.instrumental.blockSignals(False)
@@ -499,28 +502,50 @@ class LyricsReviewDialog(QDialog):
         self.sync_section_text();self.dirty=True;self.confirm.setChecked(False);self.refresh();self.status.setText('Redo applied; saved output remains unchanged.')
 
     def sync_section_text(self):
-        sections=self.document.metadata.get('recognition_regions',[])
-        if 0<=self._section_index<len(sections) and not self.document.segments:
+        sections=self.document.metadata.get('recognition_regions',[]) if not self.document.segments and not self.document.metadata.get('instrumental') else []
+        if self.section_select.count()!=len(sections):
+            self.section_select.blockSignals(True);self.section_select.clear()
+            for i,s in enumerate(sections):
+                self.section_select.addItem(f"Section {i+1} · {s['start']:.1f}–{s['end']:.1f} s",i)
+            self._section_index=min(max(0,self._section_index),len(sections)-1)
+            self.section_select.setCurrentIndex(self._section_index);self.section_select.blockSignals(False)
+        self.section_select.setVisible(bool(sections) and self.supplied_options.isChecked())
+        if 0<=self._section_index<len(sections):
             self._loading_reference=True;self.reference.setPlainText(sections[self._section_index]['text']);self._loading_reference=False
+        elif not sections:
+            self._section_index=-1
+            if self.document.metadata.get('instrumental'):
+                self._loading_reference=True;self.reference.clear();self._loading_reference=False
+            elif 'supplied_text_draft' in self.document.metadata:
+                self._loading_reference=True;self.reference.setPlainText(self.document.metadata['supplied_text_draft']);self._loading_reference=False
 
     def reset_opened_timing(self):
         try:self._accept_edit(reset_timing(self.document,self._timing_baseline),'Opened timing restored; current text retained')
         except Exception as e:self.status.setText(str(e))
 
     def designate_instrumental(self,value):
+        # Capture pending section edits before retiring the vocal candidate.
+        if value:self.commit_text_section()
         before=copy.deepcopy(self.document)
         if value:
-            self.document.metadata.setdefault('before_instrumental',self.document.to_dict())
-            self.document.segments=[];self.document.metadata['instrumental']=True
-            # The original sheet is kept in before_instrumental, not presented
-            # as an active untimed lyric sheet on an instrumental recording.
-            for key in ('timing_mode','untimed_lyrics','supplied_sheet'):
-                self.document.metadata.pop(key,None)
+            # Preserve the complete old candidate once, including raw evidence,
+            # without carrying active vocal/untimed sections into the new state.
+            identity_keys=('song_id','recording_id','origin_id','source_id','origin_song_id','source','origin','import_provenance')
+            metadata={key:copy.deepcopy(before.metadata[key]) for key in identity_keys if key in before.metadata}
+            metadata.update(instrumental=True,before_instrumental=before.to_dict(),
+                            provenance={'mode':'operator_instrumental'})
+            candidate=LyricsDocument([],before.duration,before.title,before.source_sha256,
+                                     quality={'status':'review'},metadata=metadata)
         else:
-            saved=self.document.metadata.pop('before_instrumental',None)
-            if saved:self.document=LyricsDocument.from_dict(saved)
-            self.document.metadata.pop('instrumental',None)
-        changed=mark_unreviewed(self.document,'Operator instrumental designation changed; no automatic detection.');self.document=before;self._accept_edit(changed,'Instrumental designation changed')
+            saved=before.metadata.get('before_instrumental')
+            candidate=LyricsDocument.from_dict(saved) if saved else copy.deepcopy(before)
+            candidate.metadata.pop('instrumental',None)
+            candidate.metadata.pop('before_instrumental',None)
+        changed=mark_unreviewed(candidate,'Operator instrumental designation changed; no automatic detection.')
+        self._accept_edit(changed,'Instrumental designation changed')
+        self.sync_section_text()
+        self.refresh()
+        self.status.setText('Instrumental designation changed · Private change; not saved or published.')
     def save_draft(self):
         try:
             self.commit_text_section()
@@ -563,7 +588,7 @@ class LyricsReviewDialog(QDialog):
         try:
             if self.confirm.isChecked():
                 answer=QMessageBox.question(self,'Save and use lyrics?',
-                    'Save and use these untimed lyrics in the library?' if self.document.untimed_text else 'Save and use these lyrics and timings as they are?',
+                    'Approve this recording as instrumental, with no synchronized lyrics?' if self.document.metadata.get('instrumental') else ('Save and use these untimed lyrics in the library?' if self.document.untimed_text else 'Save and use these lyrics and timings as they are?'),
                     QMessageBox.StandardButton.Ok|QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel)
                 if answer!=QMessageBox.StandardButton.Ok:
@@ -575,6 +600,7 @@ class LyricsReviewDialog(QDialog):
                 self.status.setText('Approved and attached to library; private draft copy could not be saved: '+str(warning));return
             self.status.setText('Saved and applied to this app’s library/output. Lyrics and timing kept as-is.')
             if approved.untimed_text:self.status.setText('Untimed lyrics saved to the library. No synchronized singalong or word highlighting is available without timing.')
+            if approved.metadata.get('instrumental'):self.status.setText('Instrumental approved for this recording. Broadcast-ready without lyrics or model processing.')
         except Exception as e:self.status.setText(str(e))
     def set_busy(self,value):
         self.busy=value
