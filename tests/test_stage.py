@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage,QColor
 
-from gnb_player.stage import BroadcastStage
+from gnb_player.stage import BroadcastStage, INSTRUMENTAL_NOTE_PATTERNS, INSTRUMENTAL_NOTE_SECONDS
 
 
 @pytest.fixture(scope='module')
@@ -53,6 +53,31 @@ def test_paused_playback_holds_visual_and_lyric_clock(stage):
         assert stage.position==12
     stage.set_offset(-2)
     assert stage.lyric_position==10
+
+
+def test_instrumental_notes_rotate_on_audio_clock_without_flicker(stage):
+    stage.set_track("Instrumental fixture", "Artist", "Album")
+    stage.set_visual_settings(motion=False)
+    stage.set_lyrics(SimpleNamespace(segments=[], metadata={"instrumental": True}))
+    stage.set_playback(0, 120, False)
+    first = stage._instrumental_pattern()
+    frame = stage.render_frame(1280, 720)
+    assert stage.render_frame(1280, 720) == frame
+    assert stage._lyric_rows() == (None, "", "")
+    assert set(stage._note_patterns) == set(INSTRUMENTAL_NOTE_PATTERNS)
+    stage.set_offset(12)  # Decorative notes follow audio, not lyric correction.
+    assert stage._instrumental_pattern() == first
+    with patch("gnb_player.stage.time.monotonic", return_value=stage._position_stamp + 50):
+        assert stage._instrumental_pattern() == first
+    stage.set_playback(INSTRUMENTAL_NOTE_SECONDS, 120, False)
+    second = stage._instrumental_pattern()
+    assert second != first
+    assert stage.render_frame(1280,720).copy(120,207,1040,271) != frame.copy(120,207,1040,271)
+    stage.set_playback(0, 120, False)
+    assert stage._instrumental_pattern() == first
+    assert stage.render_frame(1280,720) == frame
+    stage.set_track("Next recording")
+    assert not stage._is_instrumental()
 
 
 def test_actual_audio_changes_waveform_and_zero_audio_stays_flat(stage):

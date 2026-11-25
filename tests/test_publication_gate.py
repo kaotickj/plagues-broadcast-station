@@ -113,7 +113,7 @@ def test_in_memory_edit_and_guard_exception_fail_closed(station,tmp_path,monkeyp
     monkeypatch.setattr(w.stage,'_publication_guard',lambda doc:(_ for _ in ()).throw(OSError('read failure')))
     w.stage.render_frame(640,360);assert w.stage._lyrics is None
 
-def test_approved_instrumental_is_valid_but_has_no_lyric_display(station,tmp_path):
+def test_approved_instrumental_renders_notes_without_publishing_lyrics(station,tmp_path):
     w=station();tracks,targets=recordings(w,tmp_path,approved_second=True)
     doc=LyricsDocument([],10,tracks[0].title,fingerprint(tracks[0].path),metadata={'instrumental':True})
     save_lyrics(doc,targets[0]);w._remember_document(tracks[0],doc)
@@ -126,8 +126,12 @@ def test_approved_instrumental_is_valid_but_has_no_lyric_display(station,tmp_pat
     approved_frame=w.stage.render_frame(1280,720)
     w.stage.set_lyrics(None)
     plain_frame=w.stage.render_frame(1280,720)
-    assert approved_frame.copy(0,0,1280,530)==plain_frame.copy(0,0,1280,530)
-    assert approved_frame.copy(980,582,230,30)!=plain_frame.copy(980,582,230,30)
+    assert approved_frame.copy(120,207,1040,271)!=plain_frame.copy(120,207,1040,271)
+    assert approved_frame.copy(0,530,1280,190)==plain_frame.copy(0,530,1280,190)
+    w.stage.set_lyrics(doc)
+    w.stage.set_visual_settings(lyrics=False)
+    assert w.stage.render_frame(1280,720)==plain_frame
+    w.stage.set_visual_settings(lyrics=True)
     select_program(w,tracks[1],1)
     assert not w.stage._is_instrumental() and w.stage._lyric_rows()[0].text=='Lyric 1'
     select_program(w,tracks[0],0)

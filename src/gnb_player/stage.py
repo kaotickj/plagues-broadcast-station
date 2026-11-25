@@ -27,6 +27,13 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".g
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi"}
 BASE_W, BASE_H = 1280.0, 720.0
 DEFAULT_WAVEFORM_COLOR = "#dfbd7f"
+INSTRUMENTAL_NOTE_SECONDS = 4.0
+INSTRUMENTAL_NOTE_PATTERNS = (
+    "🎵   🎶   🎵", "🎶   🎵   🎶", "🎵   🎵   🎶",
+    "🎶   🎶   🎵", "🎵   🎶   🎶   🎵", "🎶   🎵   🎵   🎶",
+    "🎵   🎵   🎵", "🎶   🎶   🎶",
+)
+_NOTE_FALLBACK = str.maketrans({"🎵": "♪", "🎶": "♫"})
 
 
 def waveform_color(value: Any) -> str:
@@ -112,6 +119,10 @@ class BroadcastStage(QWidget):
         self._position_stamp = time.monotonic()
         self._offset = 0.0
         self._lyrics: Any = None
+        self._note_patterns = list(INSTRUMENTAL_NOTE_PATTERNS)
+        random.shuffle(self._note_patterns)
+        self._note_font: QFont | None = None
+        self._note_emoji_supported = False
         self._backgrounds: list[Path] = []
         self._bag: list[Path] = []
         self._history: list[Path] = []
@@ -153,6 +164,7 @@ class BroadcastStage(QWidget):
 
     def set_track(self, title: str, artist: str = "", album: str = "") -> None:
         self._lyrics=None
+        random.shuffle(self._note_patterns)
         self._title, self._artist, self._album = str(title), str(artist), str(album)
         self._song_frame = None
         self._video_is_song = False
@@ -438,7 +450,9 @@ class BroadcastStage(QWidget):
         veil.setColorAt(1, QColor(3, 10, 15, 232))
         p.fillRect(canvas, veil)
         self._draw_header(p)
-        if self._settings["lyrics"] and self._lyrics is not None and _get(self._lyrics, 'segments', []):
+        if self._settings["lyrics"] and self._is_instrumental():
+            self._draw_instrumental_notes(p)
+        elif self._settings["lyrics"] and self._lyrics is not None and _get(self._lyrics, 'segments', []):
             self._draw_lyrics(p)
         elif not self._title:
             p.setPen(QColor("#e5c58f"))
@@ -472,12 +486,38 @@ class BroadcastStage(QWidget):
         after = str(_get(segments[next_index], "text", "")) if next_index < len(segments) else ""
         return None, before, after
 
-    def _draw_lyrics(self, p: QPainter) -> None:
-        cue, previous, upcoming = self._lyric_rows()
+    def _draw_lyrics_panel(self, p: QPainter) -> None:
         panel = QRectF(120, 207, 1040, 271)
         p.setPen(QPen(QColor(220, 183, 119, 115), 1))
         p.setBrush(QColor(6, 17, 23, 205))
         p.drawRoundedRect(panel, 16, 16)
+
+    def _instrumental_pattern(self) -> str:
+        """Shuffle once per track; hold each pattern on the actual audio clock."""
+        slot = int(self.position / INSTRUMENTAL_NOTE_SECONDS)
+        return self._note_patterns[slot % len(self._note_patterns)]
+
+    def _draw_instrumental_notes(self, p: QPainter) -> None:
+        self._draw_lyrics_panel(p)
+        if self._note_font is None:
+            # Prefer a platform emoji font, but avoid missing-glyph boxes on
+            # minimal systems. No fonts are downloaded or bundled here.
+            font = QFont()
+            font.setFamilies(["Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", "Noto Emoji", "DejaVu Sans"])
+            font.setPixelSize(64)
+            metrics = QFontMetricsF(font)
+            self._note_emoji_supported = all(metrics.inFontUcs4(ord(note)) for note in "🎵🎶")
+            self._note_font = font if self._note_emoji_supported else _font(64)
+        pattern = self._instrumental_pattern()
+        if not self._note_emoji_supported:
+            pattern = pattern.translate(_NOTE_FALLBACK)
+        p.setFont(self._note_font)
+        p.setPen(QColor("#e4c385"))
+        p.drawText(QRectF(170, 261, 940, 163), Qt.AlignmentFlag.AlignCenter, pattern)
+
+    def _draw_lyrics(self, p: QPainter) -> None:
+        cue, previous, upcoming = self._lyric_rows()
+        self._draw_lyrics_panel(p)
         p.setFont(_font(19, serif=True))
         p.setPen(QColor("#aeb5b3"))
         previous = QFontMetricsF(p.font()).elidedText(previous.replace("\n", " "), Qt.TextElideMode.ElideRight, 920)
@@ -545,13 +585,8 @@ class BroadcastStage(QWidget):
         p.setPen(QColor("#b5bcba"))
         p.setFont(_font(16))
         credit = " · ".join(item for item in [self._artist, self._album] if item)
-        instrumental = self._is_instrumental()
-        credit_width = 890 if instrumental else 1120
-        p.drawText(QRectF(72, 582, credit_width, 30), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   QFontMetricsF(p.font()).elidedText(credit, Qt.TextElideMode.ElideRight, credit_width))
-        if instrumental:
-            p.setPen(QColor('#e4c385'))
-            p.drawText(QRectF(980, 582, 230, 30), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, '♪ Instrumental')
+        p.drawText(QRectF(72, 582, 1120, 30), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   QFontMetricsF(p.font()).elidedText(credit, Qt.TextElideMode.ElideRight, 1120))
         if self._settings["waveform"]:
             self._draw_waveform(p, QRectF(300, 637, 680, 45))
         p.setPen(QPen(QColor(199, 168, 112, 88), 1))
