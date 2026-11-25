@@ -306,6 +306,8 @@ class MainWindow(QMainWindow):
         self.assisted_review_button=self._button('Review-assisted lyrics…', self.open_assisted_review, True); self.assisted_review_button.setToolTip('Private audio preview, Qwen extraction, reviewed-text alignment, reversible corrections and explicit approval. Previous Heart / CTC engine remains selectable.'); content.addWidget(self.assisted_review_button)
         self.sheet_button=self._button('Lyrics sheet…',lambda:self.open_assisted_review(sheet=True));content.addWidget(self.sheet_button)
         self.prepare_actions=QWidget(); row=QHBoxLayout(self.prepare_actions); row.setContentsMargins(0,0,0,0); self.import_button=self._button('Import timed lyrics',self.import_lyrics); row.addWidget(self.import_button); self.extract_button=self._button('Extract & align',lambda:self.queue_extraction(False)); row.addWidget(self.extract_button); self.batch_button=self._button('Prepare missing',self.queue_missing); row.addWidget(self.batch_button); content.addWidget(self.prepare_actions)
+        batch_actions=QHBoxLayout(); self.batch_selected_button=self._button('Process selected',self.queue_selected); batch_actions.addWidget(self.batch_selected_button); self.batch_all_button=self._button('Audit entire playlist',self.queue_all); batch_actions.addWidget(self.batch_all_button); content.addLayout(batch_actions)
+        self.batch_all_button.setToolTip('Reprocess all vocal recordings, including previously approved ones. No automatic approval.')
         self.preparation_progress=QWidget(); row=QHBoxLayout(self.preparation_progress); row.setContentsMargins(0,0,0,0); self.extract_progress=QProgressBar(); self.extract_progress.setValue(0); self.extract_progress.setAccessibleName('Lyric extraction progress'); row.addWidget(self.extract_progress,1); self.cancel_extract=self._button('Cancel',self.cancel_extraction); self.cancel_extract.setEnabled(False); row.addWidget(self.cancel_extract); self.preparation_progress.hide(); content.addWidget(self.preparation_progress)
         self.lyrics_splitter=QSplitter(Qt.Orientation.Vertical); self.lyrics_splitter.setAccessibleName('Resize lyric editor and review notes'); self.lyrics_splitter.setChildrenCollapsible(False)
         notes=QWidget(); notes_layout=QVBoxLayout(notes); notes_layout.setContentsMargins(0,0,0,0)
@@ -1084,7 +1086,25 @@ class MainWindow(QMainWindow):
         if reference and not text:self._message('Paste the exact lyric sheet before aligning it.'); return
         self.open_assisted_review(supplied_text=text if reference else None,prepare=True)
     def queue_missing(self):
-        self._message('The new Qwen workflow reviews one recording at a time. Select a recording and use Extract & align. No automatic whole-library job was started; previous engine settings and saved drafts remain available.')
+        self._open_batch(self.all_tracks,missing_only=True)
+    def queue_selected(self):
+        selected={item.data(Qt.ItemDataRole.UserRole) for item in self.playlist.selectedItems()}
+        self._open_batch([t for t in self.all_tracks if str(t.path) in selected])
+    def queue_all(self):
+        self._open_batch(self.all_tracks)
+    def _open_batch(self,tracks,*,missing_only=False):
+        if not tracks:self._message('Choose recordings first.');return
+        if self.export.running or self.engine.playing:
+            self._message('Pause playback and stop output before batch preparation.');return
+        if self.extract_process.state()!=QProcess.ProcessState.NotRunning or self._extract_queue:
+            self._message('Finish or cancel existing lyric preparation first.');return
+        self.lyric_text.commit_pending_edit()
+        if self._lyric_buffers or self._saving_lyrics or self._scan_busy:
+            self._message('Save or reload lyric edits and finish scanning before batch preparation.');return
+        from .batch_review_dialog import BatchReviewDialog
+        dialog=BatchReviewDialog(self,tracks,missing_only=missing_only)
+        dialog.exec()
+        dialog.deleteLater()
     def _queue_extract(self,jobs):
         if self.export.running:self._message('Stop the output before preparing lyrics. Playback can continue.'); return
         if any(str(track.path) in self._lyric_buffers or str(track.path) in self._saving_lyrics for track,_ in jobs):
@@ -1509,13 +1529,13 @@ class MainWindow(QMainWindow):
             config=BroadcastConfig(mode=mode,target=target,width=self._export_size[0],height=self._export_size[1],fps=30,bitrate_kbps=self.bitrate.value(),secrets=(self.stream_key.text(),self.destination.text()) if mode=='stream' else ())
             self.export.set_video_frame(self.stage.render_frame(*self._export_size)); self.export.start(config)
             self.preview_timer.setInterval(33); self.start_output.setEnabled(False); self.stop_output.setEnabled(True); self._profile_controls()
-            for b in [self.extract_button,self.batch_button,self.align_button]:b.setEnabled(False)
+            for b in [self.extract_button,self.batch_button,self.batch_selected_button,self.batch_all_button,self.align_button]:b.setEnabled(False)
             if not self.engine.playing:self.toggle_play()
         except Exception as error:self._broadcast_error(str(error)); self._export_finished()
     def stop_broadcast(self):self.export.stop(); self.broadcast_label.setText('Finishing output…')
     def _export_finished(self):
         self.preview_timer.setInterval(50); self.start_output.setEnabled(True); self.stop_output.setEnabled(False); self._profile_controls()
-        for b in [self.extract_button,self.batch_button,self.align_button]:b.setEnabled(True)
+        for b in [self.extract_button,self.batch_button,self.batch_selected_button,self.batch_all_button,self.align_button]:b.setEnabled(True)
         if self._closing:QTimer.singleShot(0,self.close)
     def _broadcast_status(self,message):
         self._output_diagnostic({'event':'status','message':message})
