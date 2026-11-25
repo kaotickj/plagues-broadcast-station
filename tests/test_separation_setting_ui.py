@@ -1,5 +1,7 @@
 """Operator choice persists per station and reaches new jobs; no inference."""
 import json
+import sys
+from dataclasses import replace
 import pytest
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
@@ -35,15 +37,23 @@ def test_separation_choice_visible_save_reopen_and_other_station_unchanged(windo
 
 
 @pytest.mark.parametrize('enabled',[False,True])
-def test_extract_button_path_applies_current_choice_to_new_worker(window,tmp_path,monkeypatch,enabled):
+def test_saved_legacy_separation_choice_and_assisted_review_routing(window,tmp_path,monkeypatch,enabled):
     track=add_fixture_tracks(window,tmp_path,1)[0]
     window.playlist.setCurrentRow(0)
     window.separate_vocals.setChecked(enabled)
-    # Leave jobs queued; no model process may launch during this GUI test.
-    monkeypatch.setattr(window,'_next_extraction',lambda:None)
+    assert window.save_model_settings()
+    # The current button opens an assisted-review modal rather than a legacy
+    # extraction job. Verify routing without opening that interactive dialog.
+    calls=[]
+    monkeypatch.setattr(window,'open_assisted_review',lambda **kwargs:calls.append(kwargs))
     window.queue_extraction()
-    assert window._extract_queue==[(track,'')]
+    assert calls==[{'supplied_text':None,'prepare':True}]
+    assert not window._extract_queue
     assert window.extract_config.separate_vocals is enabled
-    command=build_command(track.path,tmp_path/'isolated-output.json',window.extract_config)
+    # The old worker still serializes the saved preference. This does not
+    # establish that the Qwen assisted-review worker consumes that setting.
+    runtime=replace(window.extract_config,python_path=sys.executable,
+                    explicit_paths=sorted(set(window.extract_config.explicit_paths)|{'python_path'}))
+    command=build_command(track.path,tmp_path/'isolated-output.json',runtime)
     config=json.loads(command[command.index('--config-json')+1])
     assert config['separate_vocals'] is enabled
